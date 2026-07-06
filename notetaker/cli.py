@@ -96,6 +96,62 @@ def _watch_recording(meeting: Meeting) -> None:
         time.sleep(0.2)
 
 
+def _dispatch_background_processing(meeting: Meeting) -> None:
+    """Dispara o pipeline de processamento em background, desanexado do shell."""
+    subprocess.Popen(
+        [sys.executable, "-m", "notetaker.cli", "_process", str(meeting.path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **audio.detached_worker_kwargs(),
+    )
+
+
+def _finalize_stopped_meta(meeting: Meeting) -> Meta:
+    """Encerra o ffmpeg e marca o meta como 'transcribing'. Retorna o meta."""
+    meta = meeting.read_meta()
+    audio.stop_recording(meta.ffmpeg_pids)  # aguarda o ffmpeg finalizar o opus
+    meta.stopped_at = datetime.now().isoformat(timespec="seconds")
+    try:
+        started = datetime.fromisoformat(meta.created_at)
+        meta.duration_seconds = (datetime.now() - started).total_seconds()
+    except Exception:
+        pass
+    meta.status = "transcribing"
+    meta.ffmpeg_pids = []
+    meeting.write_meta(meta)
+    return meta
+
+
+def _prompt_active_conflict(active: Meeting) -> str:
+    """Pergunta o que fazer quando ja ha uma reuniao gravando.
+
+    Retorna 'stop' (encerrar a atual e iniciar a nova), 'stop_only' (apenas
+    encerrar a atual, sem iniciar nova), 'new' (iniciar numa nova pasta, deixando
+    a atual gravando) ou 'abort' (cancelar). So e chamada quando ha terminal
+    interativo.
+    """
+    print(f"ja existe uma reuniao gravando: {active.path.name}.")
+    print("  [e] encerrar a gravacao em andamento e iniciar a nova")
+    print("  [s] apenas encerrar a gravacao em andamento (nao inicia nova)")
+    print("  [n] iniciar em uma nova pasta (mantem a atual gravando)")
+    print("  [c] cancelar")
+    while True:
+        try:
+            resp = input("o que deseja fazer? [e/s/n/c]: ").strip().lower()
+        except EOFError:
+            return "abort"
+        if resp in ("e", "encerrar"):
+            return "stop"
+        if resp in ("s", "so", "apenas"):
+            return "stop_only"
+        if resp in ("n", "nova", "novo"):
+            return "new"
+        if resp in ("c", "cancelar", ""):
+            return "abort"
+        print("  opcao invalida. Escolha e, s, n ou c.")
+
+
 # --------------------------------------------------------------------------- #
 # start
 # --------------------------------------------------------------------------- #
@@ -104,9 +160,32 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     active = find_active_meeting(cfg.storage_root)
     if active:
-        return _err(
-            f"ja existe uma reuniao gravando: {active.path.name}. Rode 'notetaker stop'."
-        )
+        # Sem terminal interativo (script, pipe, --no-watch encadeado) nao da
+        # para perguntar: mantem o comportamento seguro de nao mexer na
+        # gravacao em andamento.
+        if not sys.stdin.isatty():
+            return _err(
+                f"ja existe uma reuniao gravando: {active.path.name}. "
+                "Rode 'notetaker stop'."
+            )
+        decision = _prompt_active_conflict(active)
+        if decision == "abort":
+            print("cancelado; a gravacao em andamento foi mantida.")
+            return 1
+        if decision == "stop_only":
+            print(f"encerrando a reuniao em andamento: {active.path.name}...")
+            _finalize_stopped_meta(active)
+            _dispatch_background_processing(active)
+            print("reuniao encerrada; processando em background. "
+                  "Acompanhe com 'notetaker status'.")
+            return 0
+        if decision == "stop":
+            print(f"encerrando a reuniao em andamento: {active.path.name}...")
+            _finalize_stopped_meta(active)
+            _dispatch_background_processing(active)
+            print("reuniao anterior encerrada; processando em background.")
+        # decision == "new": segue adiante e cria uma nova pasta (a atual
+        # continua gravando; o proximo 'stop' encerra a mais recente).
 
     try:
         devices = audio.resolve_devices(
@@ -201,32 +280,14 @@ def cmd_stop(args: argparse.Namespace) -> int:
     if meeting is None:
         return _err("nenhuma reuniao em gravacao.")
 
-    meta = meeting.read_meta()
-    audio.stop_recording(meta.ffmpeg_pids)  # aguarda o ffmpeg finalizar o opus
-
-    meta.stopped_at = datetime.now().isoformat(timespec="seconds")
-    try:
-        started = datetime.fromisoformat(meta.created_at)
-        meta.duration_seconds = (datetime.now() - started).total_seconds()
-    except Exception:
-        pass
-    meta.status = "transcribing"
-    meta.ffmpeg_pids = []
-    meeting.write_meta(meta)
+    _finalize_stopped_meta(meeting)
 
     print(f"gravacao encerrada: {meeting.path.name}")
 
     if args.wait:
         return _run_processing(meeting)
 
-    # Dispara o pipeline em background, desanexado do shell.
-    subprocess.Popen(
-        [sys.executable, "-m", "notetaker.cli", "_process", str(meeting.path)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **audio.detached_worker_kwargs(),
-    )
+    _dispatch_background_processing(meeting)
     print("processando em background. Acompanhe com 'notetaker status'.")
     return 0
 
@@ -347,14 +408,7 @@ def cmd_retry(args: argparse.Namespace) -> int:
     if args.wait:
         return _run_processing(meeting)
 
-    # Dispara o pipeline em background, desanexado do shell (mesmo padrao do 'stop').
-    subprocess.Popen(
-        [sys.executable, "-m", "notetaker.cli", "_process", str(meeting.path)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **audio.detached_worker_kwargs(),
-    )
+    _dispatch_background_processing(meeting)
     print("processando em background. Acompanhe com 'notetaker status'.")
     return 0
 
@@ -414,14 +468,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     if args.wait:
         return _run_processing(meeting)
 
-    # Dispara o pipeline em background, desanexado do shell (mesmo padrao do 'stop').
-    subprocess.Popen(
-        [sys.executable, "-m", "notetaker.cli", "_process", str(meeting.path)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **audio.detached_worker_kwargs(),
-    )
+    _dispatch_background_processing(meeting)
     print("processando em background. Acompanhe com 'notetaker status'.")
     return 0
 
