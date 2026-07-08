@@ -155,7 +155,7 @@ def _linux_resolve(mode: str, mic_override: str, monitor_override: str) -> Devic
 
 def _linux_describe() -> list[str]:
     lines = [
-        f"backend:                PulseAudio/PipeWire",
+        "backend:                PulseAudio/PipeWire",
         f"default source (mic):   {_linux_default_source()}",
         f"default sink:           {_linux_default_sink()}",
         f"monitor (system audio): {_linux_monitor()}",
