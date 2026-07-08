@@ -11,6 +11,7 @@ import shutil
 import sys
 import threading
 import time
+from datetime import datetime
 
 # Spinner frames (braille). Fallback to ascii when terminal doesn't support.
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -26,6 +27,14 @@ def _frames() -> str:
     if "utf" in enc:
         return _FRAMES
     return _FRAMES_ASCII
+
+
+def timestamp() -> str:
+    return datetime.now().strftime("[%H:%M:%S]")
+
+
+def log(msg: str) -> None:
+    print(f"{timestamp()} {msg}")
 
 
 def format_duration(seconds: float) -> str:

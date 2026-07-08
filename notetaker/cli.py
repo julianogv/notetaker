@@ -67,9 +67,9 @@ def _run_processing(meeting: Meeting) -> int:
     try:
         pipeline.process_meeting(meeting, progress=on_progress)
     except Exception as exc:  # noqa: BLE001
-        spinner.stop(f"processing failed: {exc}")
+        spinner.stop(f"{ui.timestamp()} processing failed: {exc}")
         return 1
-    spinner.stop(f"summary ready: {meeting.summary_md}")
+    spinner.stop(f"{ui.timestamp()} summary ready: {meeting.summary_md}")
     return 0
 
 
@@ -171,17 +171,17 @@ def cmd_start(args: argparse.Namespace) -> int:
             print("cancelled; the running recording was kept.")
             return 1
         if decision == "stop_only":
-            print(f"stopping current meeting: {active.path.name}...")
+            ui.log(f"stopping current meeting: {active.path.name}...")
             _finalize_stopped_meta(active)
             _dispatch_background_processing(active)
-            print("meeting stopped; processing in background. "
-                  "Check with 'notetaker status'.")
+            ui.log("meeting stopped; processing in background. "
+                   "Check with 'notetaker status'.")
             return 0
         if decision == "stop":
-            print(f"stopping current meeting: {active.path.name}...")
+            ui.log(f"stopping current meeting: {active.path.name}...")
             _finalize_stopped_meta(active)
             _dispatch_background_processing(active)
-            print("previous meeting stopped; processing in background.")
+            ui.log("previous meeting stopped; processing in background.")
         # decision == "new": proceed and create a new folder (current keeps
         # recording; next 'stop' ends the most recent one).
 
@@ -218,7 +218,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     meta.ffmpeg_pids = pids
     meeting.write_meta(meta)
 
-    print(f"recording: {meeting.path.name}")
+    ui.log(f"recording: {meeting.path.name}")
     print(f"  mode: {args.mode}")
     if devices.mic_source:
         print(f"  mic: {devices.mic_source}")
@@ -228,7 +228,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     # Detached mode: return and let user stop with 'notetaker stop'.
     if not args.watch:
-        print("run 'notetaker stop' to stop recording and generate the summary.")
+        ui.log("run 'notetaker stop' to stop recording and generate the summary.")
         return 0
 
     # Watch mode (default): live monitoring until Ctrl+C, then process.
@@ -238,7 +238,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         pass
 
     ui.clear_line()
-    print("\nstopping recording...")
+    print(f"\n{ui.timestamp()} stopping recording...")
     return _finish_recording(meeting)
 
 
@@ -262,10 +262,10 @@ def _finish_recording(meeting: Meeting) -> int:
     meta.ffmpeg_pids = []
     meeting.write_meta(meta)
 
-    print(f"recording stopped: {meeting.path.name} "
-          f"({ui.format_duration(meta.duration_seconds)}, "
-          f"{ui.format_size(_audio_size(meeting))})")
-    print("starting local transcription and summary generation...")
+    ui.log(f"recording stopped: {meeting.path.name} "
+           f"({ui.format_duration(meta.duration_seconds)}, "
+           f"{ui.format_size(_audio_size(meeting))})")
+    ui.log("starting local transcription and summary generation...")
     return _run_processing(meeting)
 
 
@@ -280,13 +280,13 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     _finalize_stopped_meta(meeting)
 
-    print(f"recording stopped: {meeting.path.name}")
+    ui.log(f"recording stopped: {meeting.path.name}")
 
     if args.wait:
         return _run_processing(meeting)
 
     _dispatch_background_processing(meeting)
-    print("processing in background. Check with 'notetaker status'.")
+    ui.log("processing in background. Check with 'notetaker status'.")
     return 0
 
 
@@ -381,7 +381,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         return _err(str(exc))
 
     meeting.summary_md.write_text(md, encoding="utf-8")
-    print(f"summary regenerated: {meeting.summary_md}")
+    ui.log(f"summary regenerated: {meeting.summary_md}")
     return 0
 
 
@@ -401,13 +401,13 @@ def cmd_retry(args: argparse.Namespace) -> int:
     meta.status = "transcribing"
     meeting.write_meta(meta)
 
-    print(f"reprocessing: {meeting.path.name}")
+    ui.log(f"reprocessing: {meeting.path.name}")
 
     if args.wait:
         return _run_processing(meeting)
 
     _dispatch_background_processing(meeting)
-    print("processing in background. Check with 'notetaker status'.")
+    ui.log("processing in background. Check with 'notetaker status'.")
     return 0
 
 
@@ -459,15 +459,15 @@ def cmd_import(args: argparse.Namespace) -> int:
         meta.error = str(exc)
         meeting.write_meta(meta)
         return _err(str(exc))
-    spinner.stop(f"audio imported: {meeting.path.name}")
+    spinner.stop(f"{ui.timestamp()} audio imported: {meeting.path.name}")
 
-    print("starting local transcription and summary generation...")
+    ui.log("starting local transcription and summary generation...")
 
     if args.wait:
         return _run_processing(meeting)
 
     _dispatch_background_processing(meeting)
-    print("processing in background. Check with 'notetaker status'.")
+    ui.log("processing in background. Check with 'notetaker status'.")
     return 0
 
 
@@ -650,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         and args.command not in ("setup", "_process")
         and sys.stdin.isatty()
     ):
-        print("first run: no config found.")
+        ui.log("first run: no config found.")
         _check_gpu_setup()
         try:
             response = input("run the configuration assistant now? [Y/n]: ").strip().lower()
