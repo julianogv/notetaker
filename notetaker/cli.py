@@ -69,7 +69,7 @@ def _run_processing(meeting: Meeting) -> int:
     except Exception as exc:  # noqa: BLE001
         spinner.stop(f"processing failed: {exc}")
         return 1
-    spinner.stop(f"summary ready: {meeting.resumo_md}")
+    spinner.stop(f"summary ready: {meeting.summary_md}")
     return 0
 
 
@@ -97,7 +97,7 @@ def _watch_recording(meeting: Meeting) -> None:
 
 
 def _dispatch_background_processing(meeting: Meeting) -> None:
-    """Dispara o pipeline de processamento em background, desanexado do shell."""
+    """Dispatch the processing pipeline to background, detached from shell."""
     subprocess.Popen(
         [sys.executable, "-m", "notetaker.cli", "_process", str(meeting.path)],
         stdin=subprocess.DEVNULL,
@@ -108,9 +108,9 @@ def _dispatch_background_processing(meeting: Meeting) -> None:
 
 
 def _finalize_stopped_meta(meeting: Meeting) -> Meta:
-    """Encerra o ffmpeg e marca o meta como 'transcribing'. Retorna o meta."""
+    """Stop ffmpeg and mark meta as 'transcribing'. Returns the meta."""
     meta = meeting.read_meta()
-    audio.stop_recording(meta.ffmpeg_pids)  # aguarda o ffmpeg finalizar o opus
+    audio.stop_recording(meta.ffmpeg_pids)  # wait for ffmpeg to finalize opus
     meta.stopped_at = datetime.now().isoformat(timespec="seconds")
     try:
         started = datetime.fromisoformat(meta.created_at)
@@ -124,32 +124,31 @@ def _finalize_stopped_meta(meeting: Meeting) -> Meta:
 
 
 def _prompt_active_conflict(active: Meeting) -> str:
-    """Pergunta o que fazer quando ja ha uma reuniao gravando.
+    """Ask what to do when a meeting is already recording.
 
-    Retorna 'stop' (encerrar a atual e iniciar a nova), 'stop_only' (apenas
-    encerrar a atual, sem iniciar nova), 'new' (iniciar numa nova pasta, deixando
-    a atual gravando) ou 'abort' (cancelar). So e chamada quando ha terminal
-    interativo.
+    Returns 'stop' (stop current and start new), 'stop_only' (stop current only,
+    don't start new), 'new' (start in new folder, keep current recording), or
+    'abort' (cancel). Only called when there's an interactive terminal.
     """
-    print(f"ja existe uma reuniao gravando: {active.path.name}.")
-    print("  [e] encerrar a gravacao em andamento e iniciar a nova")
-    print("  [s] apenas encerrar a gravacao em andamento (nao inicia nova)")
-    print("  [n] iniciar em uma nova pasta (mantem a atual gravando)")
-    print("  [c] cancelar")
+    print(f"a meeting is already recording: {active.path.name}.")
+    print("  [s] stop current recording and start a new one")
+    print("  [o] stop current recording only (don't start new)")
+    print("  [n] start in a new folder (keep current recording)")
+    print("  [c] cancel")
     while True:
         try:
-            resp = input("o que deseja fazer? [e/s/n/c]: ").strip().lower()
+            resp = input("what would you like to do? [s/o/n/c]: ").strip().lower()
         except EOFError:
             return "abort"
-        if resp in ("e", "encerrar"):
+        if resp in ("s", "stop"):
             return "stop"
-        if resp in ("s", "so", "apenas"):
+        if resp in ("o", "only"):
             return "stop_only"
-        if resp in ("n", "nova", "novo"):
+        if resp in ("n", "new"):
             return "new"
-        if resp in ("c", "cancelar", ""):
+        if resp in ("c", "cancel", ""):
             return "abort"
-        print("  opcao invalida. Escolha e, s, n ou c.")
+        print("  invalid option. Choose s, o, n, or c.")
 
 
 # --------------------------------------------------------------------------- #
@@ -160,35 +159,31 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     active = find_active_meeting(cfg.storage_root)
     if active:
-        return _err(
-            f"a meeting is already recording: {active.path.name}. Run 'notetaker stop'."
-        )
-        # Sem terminal interativo (script, pipe, --no-watch encadeado) nao da
-        # para perguntar: mantem o comportamento seguro de nao mexer na
-        # gravacao em andamento.
+        # Without interactive terminal (script, pipe, --no-watch chained) cannot
+        # ask: maintain safe behavior of not touching the running recording.
         if not sys.stdin.isatty():
             return _err(
-                f"ja existe uma reuniao gravando: {active.path.name}. "
-                "Rode 'notetaker stop'."
+                f"a meeting is already recording: {active.path.name}. "
+                "Run 'notetaker stop'."
             )
         decision = _prompt_active_conflict(active)
         if decision == "abort":
-            print("cancelado; a gravacao em andamento foi mantida.")
+            print("cancelled; the running recording was kept.")
             return 1
         if decision == "stop_only":
-            print(f"encerrando a reuniao em andamento: {active.path.name}...")
+            print(f"stopping current meeting: {active.path.name}...")
             _finalize_stopped_meta(active)
             _dispatch_background_processing(active)
-            print("reuniao encerrada; processando em background. "
-                  "Acompanhe com 'notetaker status'.")
+            print("meeting stopped; processing in background. "
+                  "Check with 'notetaker status'.")
             return 0
         if decision == "stop":
-            print(f"encerrando a reuniao em andamento: {active.path.name}...")
+            print(f"stopping current meeting: {active.path.name}...")
             _finalize_stopped_meta(active)
             _dispatch_background_processing(active)
-            print("reuniao anterior encerrada; processando em background.")
-        # decision == "new": segue adiante e cria uma nova pasta (a atual
-        # continua gravando; o proximo 'stop' encerra a mais recente).
+            print("previous meeting stopped; processing in background.")
+        # decision == "new": proceed and create a new folder (current keeps
+        # recording; next 'stop' ends the most recent one).
 
     try:
         devices = audio.resolve_devices(
@@ -329,7 +324,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if meta.error:
         print(f"  error: {meta.error}")
     if meta.status == "done":
-        print(f"  summary: {latest.resumo_md}")
+        print(f"  summary: {latest.summary_md}")
     return 0
 
 
@@ -385,8 +380,8 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         return _err(str(exc))
 
-    meeting.resumo_md.write_text(md, encoding="utf-8")
-    print(f"summary regenerated: {meeting.resumo_md}")
+    meeting.summary_md.write_text(md, encoding="utf-8")
+    print(f"summary regenerated: {meeting.summary_md}")
     return 0
 
 
@@ -489,15 +484,15 @@ def _prompt(label: str, default: str, choices: list[str] | None = None) -> str:
     suffix = f" (default: {default})" if default else " (default: empty = auto)"
     while True:
         try:
-            resposta = input(f"{label}{hint}{suffix}: ").strip()
+            response = input(f"{label}{hint}{suffix}: ").strip()
         except EOFError:
             return default
-        if not resposta:
+        if not response:
             return default
-        if choices and resposta.lower() not in [c.lower() for c in choices]:
+        if choices and response.lower() not in [c.lower() for c in choices]:
             print(f"  invalid option. Choose one of: {', '.join(choices)}")
             continue
-        return resposta
+        return response
 
 
 def _check_gpu_setup() -> None:
@@ -609,7 +604,7 @@ def build_parser() -> argparse.ArgumentParser:
     su.set_defaults(func=cmd_setup)
 
     sm = sub.add_parser("summarize", help="regenerate summary from transcript")
-    sm.add_argument("pasta", help="meeting folder (name or path)")
+    sm.add_argument("folder", dest="pasta", help="meeting folder (name or path)")
     sm.add_argument("--output-lang", dest="output_lang",
                     choices=["meeting", "pt", "es", "en"], default="")
     sm.set_defaults(func=cmd_summarize)
@@ -618,7 +613,7 @@ def build_parser() -> argparse.ArgumentParser:
         "retry",
         help="reprocess a meeting (transcription, diarization, and summary) that failed",
     )
-    rt.add_argument("pasta", help="meeting folder (name or path)")
+    rt.add_argument("folder", dest="pasta", help="meeting folder (name or path)")
     rt.add_argument("--wait", action="store_true",
                     help="process in foreground instead of background")
     rt.set_defaults(func=cmd_retry)
@@ -627,7 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
         "import",
         help="transcribe and summarize an external audio/video file (phone, etc.)",
     )
-    im.add_argument("arquivo", help="path to audio or video file to import")
+    im.add_argument("file", dest="arquivo", help="path to audio or video file to import")
     im.add_argument("--title", default="",
                     help="meeting title (default: filename)")
     im.add_argument("--lang", choices=["auto", "pt", "es", "en"], default="")
@@ -658,10 +653,10 @@ def main(argv: list[str] | None = None) -> int:
         print("first run: no config found.")
         _check_gpu_setup()
         try:
-            resposta = input("run the configuration assistant now? [Y/n]: ").strip().lower()
+            response = input("run the configuration assistant now? [Y/n]: ").strip().lower()
         except EOFError:
-            resposta = "n"
-        if resposta in ("", "s", "sim", "y", "yes"):
+            response = "n"
+        if response in ("", "y", "yes"):
             rc = cmd_setup(args)
             if rc != 0:
                 return rc
