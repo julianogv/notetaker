@@ -1,9 +1,9 @@
-"""LLM Provider: invoca um CLI externo, enviando o prompt via stdin.
+"""LLM Provider: invokes an external CLI, sending the prompt via stdin.
 
-O comando e resolvido a partir do LLM Provider escolhido no config
-([llm].provider: "kiro" ou "claude") via `config.resolve_llm_command`.
-A transcricao + instrucoes vao por stdin (evita limite de argumento). A resposta
-vem por stdout e e devolvida crua para o summarize parsear.
+The command is resolved from the LLM Provider chosen in config
+([llm].provider: "kiro" or "claude") via `config.resolve_llm_command`.
+The transcript + instructions go via stdin (avoids argument limit). The response
+comes via stdout and is returned raw for summarize to parse.
 """
 
 from __future__ import annotations
@@ -19,21 +19,21 @@ class LLMError(RuntimeError):
 
 
 def run_llm(command: str, prompt: str, timeout: int = 600) -> str:
-    """Executa o LLM Provider passando `prompt` via stdin e retorna o stdout.
+    """Executes the LLM Provider passing `prompt` via stdin and returns stdout.
 
-    `command` e uma string de shell (ex.: "claude -p"); e dividida com shlex
-    para evitar interpretacao de shell sobre o conteudo da transcricao. No
-    Windows usamos posix=False para que barras invertidas em caminhos (ex.:
-    C:\\Ferramentas\\llm.exe) nao sejam interpretadas como escape.
+    `command` is a shell string (e.g., "claude -p"); it's split with shlex
+    to avoid shell interpretation of the transcript content. On Windows we use
+    posix=False so that backslashes in paths (e.g., C:\\Tools\\llm.exe) are not
+    interpreted as escape characters.
     """
     argv = shlex.split(command, posix=(os.name != "nt"))
     if not argv:
-        raise LLMError("comando de LLM vazio (resolvido a partir de [llm].provider)")
+        raise LLMError("empty LLM command (resolved from [llm].provider)")
 
     if shutil.which(argv[0]) is None:
         raise LLMError(
-            f"CLI de LLM nao encontrado: '{argv[0]}'. "
-            f"Ajuste [llm].provider no config (kiro | claude) ou instale a CLI."
+            f"LLM CLI not found: '{argv[0]}'. "
+            f"Adjust [llm].provider in config (kiro | claude) or install the CLI."
         )
 
     try:
@@ -45,15 +45,15 @@ def run_llm(command: str, prompt: str, timeout: int = 600) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise LLMError(f"LLM Provider excedeu o tempo limite ({timeout}s)") from exc
+        raise LLMError(f"LLM Provider exceeded time limit ({timeout}s)") from exc
 
     if proc.returncode != 0:
-        detalhe = proc.stderr.strip() or proc.stdout.strip()
+        detail = proc.stderr.strip() or proc.stdout.strip()
         raise LLMError(
-            f"LLM Provider retornou codigo {proc.returncode}: {detalhe}"
+            f"LLM Provider returned code {proc.returncode}: {detail}"
         )
 
     output = proc.stdout.strip()
     if not output:
-        raise LLMError("LLM Provider nao retornou saida")
+        raise LLMError("LLM Provider returned no output")
     return output

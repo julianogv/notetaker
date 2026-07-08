@@ -1,7 +1,7 @@
-"""Transcricao local em batch com faster-whisper, uma Track por vez.
+"""Local batch transcription with faster-whisper, one track at a time.
 
-Idioma pode ser fixado (pt/es/en) ou 'auto' (Whisper detecta). O idioma
-detectado da Track mic e usado como Meeting Language efetiva.
+Language can be fixed (pt/es/en) or 'auto' (Whisper detects). The detected
+language of the mic track is used as the effective meeting language.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Idiomas suportados explicitamente pelo Notetaker.
+# Languages explicitly supported by Notetaker.
 SUPPORTED_LANGS = ("pt", "es", "en")
 
 
@@ -27,15 +27,15 @@ class Segment:
 
 @dataclass
 class TranscribeStats:
-    """Metricas de desempenho de uma transcricao, para diagnostico.
+    """Transcription performance metrics for diagnostics.
 
-    rtf (real-time factor) = tempo_transcricao / duracao_audio. rtf < 1 e mais
-    rapido que tempo real; rtf > 1 e mais lento (comum em CPU com modelo grande).
+    rtf (real-time factor) = transcription_time / audio_duration. rtf < 1 is faster
+    than real-time; rtf > 1 is slower (common on CPU with large model).
     """
 
-    audio_seconds: float = 0.0        # duracao do audio transcrito
-    model_load_seconds: float = 0.0   # tempo para carregar o modelo (0 se cache)
-    transcribe_seconds: float = 0.0   # tempo efetivo de transcricao
+    audio_seconds: float = 0.0        # duration of transcribed audio
+    model_load_seconds: float = 0.0   # time to load the model (0 if cached)
+    transcribe_seconds: float = 0.0   # actual transcription time
     segments: int = 0
 
     @property
@@ -55,19 +55,19 @@ class TrackTranscript:
 
 _model_cache: dict[tuple, object] = {}
 
-# Resultado memoizado da deteccao de dispositivo de computacao.
+# Memoized result of compute device detection.
 _compute_device: tuple[str, str] | None = None
 
 
 def detect_compute_device() -> tuple[str, str]:
-    """Detecta o melhor (device, compute_type) para o faster-whisper.
+    """Detects the best (device, compute_type) for faster-whisper.
 
-    Retorna ("cuda", "float16") se houver GPU NVIDIA utilizavel pelo CTranslate2;
-    caso contrario ("cpu", "int8"). O resultado e memoizado.
+    Returns ("cuda", "float16") if there is a usable NVIDIA GPU by CTranslate2;
+    otherwise ("cpu", "int8"). The result is memoized.
 
-    Nota: o CTranslate2 (backend do faster-whisper) so acelera em GPUs NVIDIA
-    (CUDA). Nao ha suporte a Metal/MPS, entao Macs (Apple Silicon ou Intel)
-    permanecem em CPU.
+    Note: CTranslate2 (faster-whisper backend) only accelerates on NVIDIA GPUs
+    (CUDA). There is no Metal/MPS support, so Macs (Apple Silicon or Intel)
+    remain on CPU.
     """
     global _compute_device
     if _compute_device is not None:
@@ -80,7 +80,7 @@ def detect_compute_device() -> tuple[str, str]:
         if ctranslate2.get_cuda_device_count() > 0:
             device, compute = "cuda", "float16"
     except Exception:
-        # Sem ctranslate2/CUDA disponivel: mantem CPU.
+        # No ctranslate2/CUDA available: keep CPU.
         pass
 
     _compute_device = (device, compute)
@@ -88,19 +88,19 @@ def detect_compute_device() -> tuple[str, str]:
 
 
 def _load_model(model_name: str, cpu_threads: int = 0, use_cache: bool = True):
-    """Carrega o modelo faster-whisper no melhor dispositivo disponivel.
+    """Loads the faster-whisper model on the best available device.
 
-    Usa GPU NVIDIA (cuda/float16) quando detectada; senao CPU (int8). Em CPU,
-    cpu_threads=0 deixa o CTranslate2 decidir (todos os cores); para transcricao
-    paralela, passe metade dos cores e use_cache=False, de modo que cada Track
-    tenha sua propria instancia com seu proprio pool de threads. Em GPU, o
-    cpu_threads e irrelevante e a paralelizacao por threads nao se aplica.
+    Uses NVIDIA GPU (cuda/float16) when detected; otherwise CPU (int8). On CPU,
+    cpu_threads=0 lets CTranslate2 decide (all cores); for parallel transcription,
+    pass half the cores and use_cache=False, so each track has its own instance
+    with its own thread pool. On GPU, cpu_threads is irrelevant and thread
+    parallelization does not apply.
     """
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
         raise TranscribeError(
-            "faster-whisper nao instalado. Rode: pip install -e ."
+            "faster-whisper not installed. Run: pip install -e ."
         ) from exc
 
     device, compute_type = detect_compute_device()
@@ -126,17 +126,17 @@ def _load_model(model_name: str, cpu_threads: int = 0, use_cache: bool = True):
 
 
 def gpu_available() -> bool:
-    """True se a transcricao usara GPU NVIDIA."""
+    """True if transcription will use NVIDIA GPU."""
     return detect_compute_device()[0] == "cuda"
 
 
 def nvidia_gpu_present() -> bool:
-    """Indica se ha uma GPU NVIDIA no hardware (via nvidia-smi).
+    """Indicates if there is an NVIDIA GPU in the hardware (via nvidia-smi).
 
-    Diferente de detect_compute_device(), que so retorna 'cuda' quando as libs
-    CUDA (ctranslate2 + cublas/cudnn) ja estao utilizaveis em runtime. Esta
-    checagem detecta o hardware antes das libs estarem prontas, para orientar a
-    instalacao do libcublas na primeira execucao.
+    Different from detect_compute_device(), which only returns 'cuda' when CUDA
+    libs (ctranslate2 + cublas/cudnn) are already usable at runtime. This check
+    detects the hardware before the libs are ready, to guide libcublas installation
+    on first run.
     """
     import shutil
     import subprocess
@@ -151,17 +151,17 @@ def nvidia_gpu_present() -> bool:
             timeout=5,
         )
     except Exception:
-        # nvidia-smi presente mas nao executavel (driver ausente etc.): sem GPU.
+        # nvidia-smi present but not executable (missing driver, etc.): no GPU.
         return False
     return result.returncode == 0 and "GPU" in result.stdout
 
 
 def load_model(model_name: str, cpu_threads: int = 0):
-    """Carrega uma instancia dedicada do modelo (sem cache).
+    """Loads a dedicated model instance (without cache).
 
-    O carregador do faster-whisper nao e seguro para uso concorrente, entao o
-    caminho paralelo carrega os modelos sequencialmente com esta funcao e depois
-    transcreve em threads.
+    The faster-whisper loader is not thread-safe for concurrent use, so the
+    parallel path loads models sequentially with this function and then
+    transcribes in threads.
     """
     return _load_model(model_name, cpu_threads=cpu_threads, use_cache=False)
 
@@ -174,19 +174,19 @@ def transcribe_track(
     use_cache: bool = True,
     preloaded_model=None,
 ) -> TrackTranscript:
-    """Transcreve uma Track. language 'auto' deixa o Whisper detectar.
+    """Transcribes a track. language 'auto' lets Whisper detect.
 
-    preloaded_model: instancia WhisperModel ja carregada. Usada no caminho
-    paralelo, onde os modelos sao carregados sequencialmente antes (o carregador
-    do faster-whisper nao e seguro para uso concorrente).
+    preloaded_model: WhisperModel instance already loaded. Used in the parallel
+    path, where models are loaded sequentially first (the faster-whisper loader
+    is not thread-safe for concurrent use).
     """
     if not audio_path.exists():
-        raise TranscribeError(f"audio nao encontrado: {audio_path}")
+        raise TranscribeError(f"audio not found: {audio_path}")
     if audio_path.stat().st_size == 0:
         raise TranscribeError(
-            f"audio vazio (0 B): {audio_path.name}. A captura pode ter falhado; "
-            f"verifique o log ffmpeg-*.log na pasta da reuniao e os dispositivos "
-            f"com 'notetaker devices'."
+            f"empty audio (0 B): {audio_path.name}. Capture may have failed; "
+            f"check the ffmpeg-*.log file in the meeting folder and the devices "
+            f"with 'notetaker devices'."
         )
 
     stats = TranscribeStats()
@@ -200,7 +200,7 @@ def transcribe_track(
 
     lang_arg = None if language == "auto" else language
 
-    # A chamada retorna um gerador; o trabalho pesado ocorre ao iterar.
+    # The call returns a generator; heavy work happens when iterating.
     t1 = time.monotonic()
     segments_iter, info = model.transcribe(
         str(audio_path),

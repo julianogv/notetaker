@@ -1,7 +1,7 @@
-"""Helpers de saida no terminal: spinner/animacao e formatacao.
+"""Terminal output helpers: spinner/animation and formatting.
 
-Respeita TTY: quando a saida nao e um terminal (pipe, arquivo), degrada para
-mensagens simples em linha, sem escapes de cursor.
+Respects TTY: when output is not a terminal (pipe, file), degrades to simple
+single-line messages without cursor escapes.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-# Frames do spinner (braille). Fallback ascii quando o terminal nao suporta.
+# Spinner frames (braille). Fallback to ascii when terminal doesn't support.
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _FRAMES_ASCII = "|/-\\"
 
@@ -29,7 +29,7 @@ def _frames() -> str:
 
 
 def format_duration(seconds: float) -> str:
-    """Formata segundos como HH:MM:SS (ou MM:SS quando < 1h)."""
+    """Formats seconds as HH:MM:SS (or MM:SS when < 1h)."""
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -39,7 +39,7 @@ def format_duration(seconds: float) -> str:
 
 
 def format_size(num_bytes: int) -> str:
-    """Formata bytes em unidade legivel (B, KB, MB, GB)."""
+    """Formats bytes as a readable unit (B, KB, MB, GB)."""
     size = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024 or unit == "GB":
@@ -57,7 +57,7 @@ def clear_line() -> None:
 
 
 def status_line(text: str) -> None:
-    """Escreve uma linha de status reescrevivel (fica na mesma linha no TTY)."""
+    """Writes a rewritable status line (stays on same line in TTY)."""
     width = shutil.get_terminal_size((80, 20)).columns
     text = text[: width - 1]
     if is_tty():
@@ -69,13 +69,13 @@ def status_line(text: str) -> None:
 
 
 class Spinner:
-    """Spinner em thread para tarefas de duracao indefinida (ex.: transcricao).
+    """Spinner in thread for indefinite duration tasks (e.g., transcription).
 
-    Uso:
-        with Spinner("transcrevendo..."):
-            trabalho_pesado()
+    Usage:
+        with Spinner("transcribing..."):
+            heavy_work()
 
-    Em nao-TTY, apenas imprime a mensagem uma vez ao iniciar.
+    In non-TTY, only prints the message once at startup.
     """
 
     def __init__(self, message: str, interval: float = 0.1):

@@ -1,4 +1,4 @@
-"""Layout em disco de uma Meeting e leitura/escrita do meta.json."""
+"""Disk layout of a meeting and reading/writing of meta.json."""
 
 from __future__ import annotations
 
@@ -13,21 +13,21 @@ META_FILENAME = "meta.json"
 
 
 def slugify(text: str) -> str:
-    """Converte um titulo em slug ascii seguro para nome de pasta."""
+    """Converts a title to a safe ASCII slug for folder name."""
     normalized = unicodedata.normalize("NFKD", text)
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
     ascii_text = ascii_text.lower()
     ascii_text = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
-    return ascii_text or "reuniao"
+    return ascii_text or "meeting"
 
 
 @dataclass
 class Meeting:
-    """Uma Meeting e a pasta em disco que a representa."""
+    """A meeting is the folder on disk that represents it."""
 
     path: Path
 
-    # --- Caminhos das Tracks e artefatos ---
+    # --- Paths of tracks and artifacts ---
     @property
     def audio_mic(self) -> Path:
         return self.path / "audio-mic.opus"
@@ -57,8 +57,8 @@ class Meeting:
         return self.path / "transcript-full.txt"
 
     @property
-    def resumo_md(self) -> Path:
-        return self.path / "resumo.md"
+    def summary_md(self) -> Path:
+        return self.path / "summary.md"
 
     @property
     def meta_path(self) -> Path:
@@ -74,12 +74,12 @@ class Meeting:
 
 @dataclass
 class Meta:
-    """Metadados de uma Meeting (persistidos em meta.json)."""
+    """Metadata of a meeting (persisted in meta.json)."""
 
     title: str = ""
-    mode: str = "online"            # online | presencial | listener
-    lang: str = "auto"             # idioma de entrada (transcricao)
-    output_lang: str = "meeting"   # idioma do Summary
+    mode: str = "online"            # online | in-person | listener
+    lang: str = "auto"             # input language (transcription)
+    output_lang: str = "meeting"   # Summary output language
     diarization: str = "level1"    # level1 | level2
     whisper_model: str = "medium"
     status: str = "created"        # created|recording|transcribing|summarizing|done|error
@@ -89,7 +89,7 @@ class Meta:
     ffmpeg_pids: list[int] = field(default_factory=list)
     mic_source: str = ""
     monitor_source: str = ""
-    detected_lang: str = ""        # idioma detectado pelo Whisper (se auto)
+    detected_lang: str = ""        # language detected by Whisper (if auto)
     error: str = ""
     extra: dict = field(default_factory=dict)
 
@@ -107,7 +107,7 @@ class Meta:
 
 
 def create_meeting(storage_root: Path, title: str) -> Meeting:
-    """Cria a pasta da Meeting: <root>/<data_hora_slug>/."""
+    """Creates the meeting folder: <root>/<date_time_slug>/."""
     now = datetime.now()
     folder = f"{now.strftime('%Y-%m-%d_%H%M')}_{slugify(title)}"
     path = storage_root.expanduser() / folder
@@ -116,7 +116,7 @@ def create_meeting(storage_root: Path, title: str) -> Meeting:
 
 
 def list_meetings(storage_root: Path) -> list[Meeting]:
-    """Lista Meetings existentes, mais recentes primeiro."""
+    """Lists existing meetings, most recent first."""
     root = storage_root.expanduser()
     if not root.exists():
         return []
@@ -126,7 +126,7 @@ def list_meetings(storage_root: Path) -> list[Meeting]:
 
 
 def find_active_meeting(storage_root: Path) -> Meeting | None:
-    """Retorna a Meeting em gravacao (status == recording), se houver."""
+    """Returns the meeting being recorded (status == recording), if any."""
     for meeting in list_meetings(storage_root):
         try:
             if meeting.read_meta().status == "recording":
@@ -137,7 +137,7 @@ def find_active_meeting(storage_root: Path) -> Meeting | None:
 
 
 def resolve_meeting(storage_root: Path, ref: str) -> Meeting | None:
-    """Resolve uma Meeting por caminho absoluto ou nome de pasta."""
+    """Resolves a meeting by absolute path or folder name."""
     p = Path(ref).expanduser()
     if p.is_dir() and (p / META_FILENAME).exists():
         return Meeting(path=p)

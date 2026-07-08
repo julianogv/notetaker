@@ -1,4 +1,4 @@
-"""Carrega e cria o config do Notetaker (~/.config/notetaker/config.toml)."""
+"""Loads and creates the Notetaker config (~/.config/notetaker/config.toml)."""
 
 from __future__ import annotations
 
@@ -9,30 +9,29 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".config" / "notetaker" / "config.toml"
 
 DEFAULT_CONFIG_TOML = """\
-# Config do Notetaker. Campos vazios de dispositivo = deteccao automatica.
+# Notetaker config. Empty device fields = auto-detection.
 storage_root = "~/notetaker"
 
 [audio]
-# Vazio = auto. Linux: usa o default source/sink do PulseAudio. macOS: usa o
-# indice de dispositivo do avfoundation (mic = indice do microfone; monitor =
-# indice do dispositivo de loopback tipo BlackHole, necessario no modo online).
-# Windows: usa o nome do dispositivo do dshow (mic = nome do microfone; monitor
-# = nome do Stereo Mix ou dispositivo virtual tipo VB-CABLE, necessario no modo
-# online).
+# Empty = auto. Linux: uses the default PulseAudio source/sink. macOS: uses the
+# avfoundation device index (mic = microphone index; monitor = loopback device
+# index like BlackHole, required for online mode). Windows: uses the dshow
+# device name (mic = microphone name; monitor = Stereo Mix name or virtual
+# device like VB-CABLE, required for online mode).
 mic_source = ""
 monitor_source = ""
 
 [whisper]
 model = "medium"       # tiny | base | small | medium | large-v3
 language = "auto"      # auto | pt | es | en
-# GPU NVIDIA (cuda) e usada automaticamente quando detectada; senao, CPU.
+# NVIDIA GPU (cuda) is used automatically when detected; otherwise, CPU.
 
 [summary]
-# "meeting" = mesmo idioma da reuniao. Ou fixe: pt | es | en
+# "meeting" = same language as the meeting. Or fix: pt | es | en
 language = "meeting"
 
 [llm]
-# LLM Provider usado para gerar o Summary a partir da transcricao (via stdin).
+# LLM Provider used to generate the summary from the transcription (via stdin).
 provider = "kiro"      # kiro | claude
 """
 
@@ -54,8 +53,8 @@ class SummaryConfig:
     language: str = "meeting"
 
 
-# Providers de LLM suportados e o comando de CLI correspondente. O comando
-# recebe a transcricao via stdin e devolve o Summary em Markdown pelo stdout.
+# Supported LLM providers and their corresponding CLI command. The command
+# receives the transcription via stdin and returns the summary in Markdown via stdout.
 LLM_PROVIDER_COMMANDS: dict[str, str] = {
     "kiro": "kiro-cli chat --no-interactive",
     "claude": "claude -p",
@@ -67,13 +66,13 @@ class InvalidLLMProviderError(ValueError):
 
 
 def resolve_llm_command(provider: str) -> str:
-    """Mapeia o LLM Provider (kiro|claude) para o comando de CLI real."""
+    """Maps the LLM Provider (kiro|claude) to the actual CLI command."""
     try:
         return LLM_PROVIDER_COMMANDS[provider]
     except KeyError:
-        opcoes = ", ".join(LLM_PROVIDER_COMMANDS)
+        options = ", ".join(LLM_PROVIDER_COMMANDS)
         raise InvalidLLMProviderError(
-            f"LLM Provider invalido: '{provider}'. Opcoes: {opcoes}."
+            f"Invalid LLM Provider: '{provider}'. Options: {options}."
         ) from None
 
 
@@ -96,12 +95,12 @@ def _expand(path_str: str) -> Path:
 
 
 def config_exists() -> bool:
-    """Indica se o config ja foi criado (usado para detectar a primeira execucao)."""
+    """Indicates whether the config has already been created (used to detect first run)."""
     return CONFIG_PATH.exists()
 
 
 def ensure_config() -> Path:
-    """Cria o config com defaults se ainda nao existir. Retorna o caminho."""
+    """Creates the config with defaults if it doesn't exist yet. Returns the path."""
     if not CONFIG_PATH.exists():
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
@@ -109,57 +108,56 @@ def ensure_config() -> Path:
 
 
 def _toml_str(value: str) -> str:
-    """Escapa uma string para valor TOML entre aspas."""
+    """Escapes a string for TOML quoted value."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def render_config_toml(cfg: Config) -> str:
-    """Renderiza um Config como TOML comentado (mesmo formato do default)."""
+    """Renders a Config as commented TOML (same format as default)."""
     storage = str(cfg.storage_root)
-    # Preserva o "~" quando o storage_root esta dentro do HOME do usuario.
+    # Preserves the "~" when storage_root is within the user's HOME.
     home = str(Path.home())
     if storage == home:
         storage = "~"
     elif storage.startswith(home + "/"):
         storage = "~" + storage[len(home):]
     return f"""\
-# Config do Notetaker. Campos vazios de dispositivo = deteccao automatica.
+# Notetaker config. Empty device fields = auto-detection.
 storage_root = {_toml_str(storage)}
 
 [audio]
-# Vazio = auto. Linux: usa o default source/sink do PulseAudio. macOS: usa o
-# indice de dispositivo do avfoundation (mic = indice do microfone; monitor =
-# indice do dispositivo de loopback tipo BlackHole, necessario no modo online).
-# Windows: usa o nome do dispositivo do dshow (mic = nome do microfone; monitor
-# = nome do Stereo Mix ou dispositivo virtual tipo VB-CABLE, necessario no modo
-# online).
+# Empty = auto. Linux: uses the default PulseAudio source/sink. macOS: uses the
+# avfoundation device index (mic = microphone index; monitor = loopback device
+# index like BlackHole, required for online mode). Windows: uses the dshow
+# device name (mic = microphone name; monitor = Stereo Mix name or virtual
+# device like VB-CABLE, required for online mode).
 mic_source = {_toml_str(cfg.audio.mic_source)}
 monitor_source = {_toml_str(cfg.audio.monitor_source)}
 
 [whisper]
 model = {_toml_str(cfg.whisper.model)}       # tiny | base | small | medium | large-v3
 language = {_toml_str(cfg.whisper.language)}      # auto | pt | es | en
-# GPU NVIDIA (cuda) e usada automaticamente quando detectada; senao, CPU.
+# NVIDIA GPU (cuda) is used automatically when detected; otherwise, CPU.
 
 [summary]
-# "meeting" = mesmo idioma da reuniao. Ou fixe: pt | es | en
+# "meeting" = same language as the meeting. Or fix: pt | es | en
 language = {_toml_str(cfg.summary.language)}
 
 [llm]
-# LLM Provider usado para gerar o Summary a partir da transcricao (via stdin).
+# LLM Provider used to generate the summary from the transcription (via stdin).
 provider = {_toml_str(cfg.llm.provider)}      # kiro | claude
 """
 
 
 def write_config(cfg: Config) -> Path:
-    """Grava o config renderizado a partir de um Config. Retorna o caminho."""
+    """Writes the rendered config from a Config object. Returns the path."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(render_config_toml(cfg), encoding="utf-8")
     return CONFIG_PATH
 
 
 def load_config() -> Config:
-    """Carrega o config, criando defaults na primeira execucao."""
+    """Loads the config, creating defaults on first run."""
     ensure_config()
     with CONFIG_PATH.open("rb") as fh:
         data = tomllib.load(fh)
@@ -170,10 +168,10 @@ def load_config() -> Config:
     llm_data = data.get("llm", {})
     provider = llm_data.get("provider", "kiro")
     if provider not in LLM_PROVIDER_COMMANDS:
-        opcoes = ", ".join(LLM_PROVIDER_COMMANDS)
+        options = ", ".join(LLM_PROVIDER_COMMANDS)
         raise InvalidLLMProviderError(
-            f"LLM Provider invalido em [llm].provider: '{provider}'. "
-            f"Opcoes: {opcoes}."
+            f"Invalid LLM Provider in [llm].provider: '{provider}'. "
+            f"Options: {options}."
         )
 
     return Config(

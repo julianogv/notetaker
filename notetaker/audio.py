@@ -1,18 +1,17 @@
-"""Captura de audio via ffmpeg, com backend por plataforma.
+"""Audio capture via ffmpeg, with backend per platform.
 
-Linux:   backend PulseAudio/PipeWire (`-f pulse`), dispositivos via `pactl`.
-macOS:   backend AVFoundation (`-f avfoundation`), dispositivos via ffmpeg. O
-         audio de saida (participantes, modo online) exige um dispositivo virtual
-         como o BlackHole, pois o macOS nao expoe a saida para captura
-         nativamente.
-Windows: backend DirectShow (`-f dshow`), dispositivos via ffmpeg. O audio de
-         saida (participantes, modo online) exige um dispositivo virtual (VB-CABLE,
-         VoiceMeeter) ou o "Stereo Mix"/"Mixagem estereo" da placa, pois o dshow
-         nao expoe a saida para captura nativamente.
+Linux:   PulseAudio/PipeWire backend (`-f pulse`), devices via `pactl`.
+macOS:   AVFoundation backend (`-f avfoundation`), devices via ffmpeg. The
+         output audio (participants, online mode) requires a virtual device
+         like BlackHole, because macOS does not expose the output for capture
+         natively.
+Windows: DirectShow backend (`-f dshow`), devices via ffmpeg. The output audio
+         (participants, online mode) requires a virtual device (VB-CABLE,
+         VoiceMeeter) or the "Stereo Mix" from the soundcard, because dshow
+         does not expose the output for capture natively.
 
-A API publica (resolve_devices, start_recording, stop_recording, read_progress)
-e a mesma em qualquer plataforma; o backend correto e escolhido em tempo de
-execucao.
+The public API (resolve_devices, start_recording, stop_recording, read_progress)
+is the same on any platform; the correct backend is chosen at runtime.
 """
 
 from __future__ import annotations
@@ -36,9 +35,9 @@ class AudioError(RuntimeError):
 @dataclass
 class Devices:
     mic_source: str
-    monitor_source: str  # vazio no modo presencial
+    monitor_source: str  # empty in in-person mode
 
-    # Formato de entrada do ffmpeg para esta plataforma ("pulse" ou "avfoundation").
+    # ffmpeg input format for this platform ("pulse" or "avfoundation").
     input_format: str = "pulse"
 
 
@@ -46,10 +45,10 @@ def _run(cmd: list[str]) -> str:
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except FileNotFoundError as exc:
-        raise AudioError(f"comando nao encontrado: {cmd[0]}") from exc
+        raise AudioError(f"command not found: {cmd[0]}") from exc
     except subprocess.CalledProcessError as exc:
         raise AudioError(
-            f"falha ao executar {' '.join(cmd)}: {exc.stderr.strip()}"
+            f"failed to execute {' '.join(cmd)}: {exc.stderr.strip()}"
         ) from exc
     return out.stdout.strip()
 
@@ -63,12 +62,12 @@ def _is_windows() -> bool:
 
 
 def _detached_popen_kwargs() -> dict:
-    """kwargs para desanexar um subprocesso do terminal/shell atual.
+    """kwargs to detach a subprocess from the current terminal/shell.
 
-    POSIX: nova sessao (setsid), para que o Ctrl+C do terminal nao atinja o
-    processo diretamente. Windows: novo grupo de processo, requisito para depois
-    entregar o CTRL_BREAK_EVENT em stop_recording; sem novo grupo, o ffmpeg nao
-    finalizaria o container opus corretamente.
+    POSIX: new session (setsid), so that terminal Ctrl+C doesn't reach the
+    process directly. Windows: new process group, requirement for later
+    delivering CTRL_BREAK_EVENT in stop_recording; without a new group, ffmpeg
+    would not finalize the opus container correctly.
     """
     if _is_windows():
         # CREATE_NEW_PROCESS_GROUP so existe no subprocess do Windows.
@@ -78,12 +77,12 @@ def _detached_popen_kwargs() -> dict:
 
 
 def detached_worker_kwargs() -> dict:
-    """kwargs para o worker de background (pipeline pos-stop), sem TTY.
+    """kwargs for the background worker (post-stop pipeline), without TTY.
 
-    Diferente dos recorders, o worker nao precisa receber sinal de parada; ele
-    apenas roda ate concluir. No Windows, combina novo grupo de processo com
-    DETACHED_PROCESS para desanexar totalmente do console do shell. Em POSIX,
-    nova sessao (setsid).
+    Unlike recorders, the worker does not need to receive a stop signal; it
+    just runs until completion. On Windows, combines new process group with
+    DETACHED_PROCESS to fully detach from the shell console. On POSIX,
+    new session (setsid).
     """
     if _is_windows():
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP") | getattr(
@@ -94,11 +93,11 @@ def detached_worker_kwargs() -> dict:
 
 
 def _send_stop_signal(pid: int) -> None:
-    """Envia o sinal que faz o ffmpeg finalizar o container opus e sair.
+    """Sends the signal that makes ffmpeg finalize the opus container and exit.
 
-    POSIX: SIGINT ao processo. Windows: CTRL_BREAK_EVENT ao grupo de processo
-    (criado com CREATE_NEW_PROCESS_GROUP no start_recording); o ffmpeg trata como
-    interrupcao e escreve o trailer do opus.
+    POSIX: SIGINT to the process. Windows: CTRL_BREAK_EVENT to the process group
+    (created with CREATE_NEW_PROCESS_GROUP in start_recording); ffmpeg treats it as
+    interruption and writes the opus trailer.
     """
     try:
         if _is_windows():
@@ -115,18 +114,18 @@ def _check_ffmpeg() -> None:
         if _is_macos():
             hint = "brew install ffmpeg"
         elif _is_windows():
-            hint = "winget install Gyan.FFmpeg (ou choco install ffmpeg)"
+            hint = "winget install Gyan.FFmpeg (or choco install ffmpeg)"
         else:
             hint = "sudo apt install ffmpeg"
-        raise AudioError(f"ffmpeg nao encontrado. Instale com: {hint}")
+        raise AudioError(f"ffmpeg not found. Install with: {hint}")
 
 
 # =========================================================================== #
-# Backend Linux (PulseAudio / PipeWire)
+# Linux Backend (PulseAudio / PipeWire)
 # =========================================================================== #
 def _linux_check() -> None:
     if shutil.which("pactl") is None:
-        raise AudioError("pactl nao encontrado. PulseAudio/PipeWire e necessario.")
+        raise AudioError("pactl not found. PulseAudio/PipeWire is required.")
 
 
 def _linux_default_source() -> str:
@@ -138,17 +137,17 @@ def _linux_default_sink() -> str:
 
 
 def _linux_monitor() -> str:
-    """O monitor source correspondente ao default sink atual."""
+    """The monitor source corresponding to the current default sink."""
     return f"{_linux_default_sink()}.monitor"
 
 
 def _linux_resolve(mode: str, mic_override: str, monitor_override: str) -> Devices:
     if mode == "listener":
-        # So a saida do sistema (voz dos participantes); o mic nao e gravado.
+        # Only the system output (participants' voices); mic is not recorded.
         monitor = monitor_override or _linux_monitor()
         return Devices(mic_source="", monitor_source=monitor, input_format="pulse")
     mic = mic_override or _linux_default_source()
-    if mode == "presencial":
+    if mode == "in-person":
         return Devices(mic_source=mic, monitor_source="", input_format="pulse")
     monitor = monitor_override or _linux_monitor()
     return Devices(mic_source=mic, monitor_source=monitor, input_format="pulse")
@@ -165,20 +164,20 @@ def _linux_describe() -> list[str]:
 
 
 # =========================================================================== #
-# Backend macOS (AVFoundation)
+# macOS Backend (AVFoundation)
 # =========================================================================== #
-# Nome do dispositivo virtual usado para capturar o audio de saida no Mac.
+# Name of the virtual device used to capture output audio on Mac.
 _MACOS_LOOPBACK_HINTS = ("blackhole", "loopback", "soundflower")
 
-# Linha do -list_devices: "[AVFoundation indev @ 0x..] [0] Device Name"
+# Line from -list_devices: "[AVFoundation indev @ 0x..] [0] Device Name"
 _AVF_DEVICE_RE = re.compile(r"\]\s*\[(\d+)\]\s*(.+)$")
 
 
 def _macos_list_audio_devices() -> list[tuple[int, str]]:
-    """Lista (indice, nome) dos dispositivos de audio via avfoundation.
+    """Lists (index, name) of audio devices via avfoundation.
 
-    O ffmpeg imprime a lista no stderr e sai com codigo != 0 (comportamento
-    esperado do -list_devices), entao nao usamos check=True aqui.
+    ffmpeg prints the list to stderr and exits with code != 0 (expected behavior
+    of -list_devices), so we don't use check=True here.
     """
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
@@ -205,7 +204,7 @@ def _macos_list_audio_devices() -> list[tuple[int, str]]:
 
 
 def _macos_find_loopback(devices: list[tuple[int, str]]) -> int | None:
-    """Encontra o indice de um dispositivo de loopback (BlackHole etc.)."""
+    """Finds the index of a loopback device (BlackHole, etc.)."""
     for idx, name in devices:
         if any(hint in name.lower() for hint in _MACOS_LOOPBACK_HINTS):
             return idx
@@ -216,39 +215,39 @@ def _macos_resolve(mode: str, mic_override: str, monitor_override: str) -> Devic
     devices = _macos_list_audio_devices()
     if not devices and not mic_override:
         raise AudioError(
-            "nenhum dispositivo de audio detectado via avfoundation. "
-            "Verifique as permissoes de microfone do terminal em "
-            "Ajustes > Privacidade e Seguranca > Microfone."
+            "no audio devices detected via avfoundation. "
+            "Check the terminal microphone permissions in "
+            "System Settings > Privacy and Security > Microphone."
         )
 
-    # Mic: override explicito, ou o primeiro dispositivo de audio (indice 0 e o
-    # default de entrada na maioria dos Macs).
+    # Mic: explicit override, or the first audio device (index 0 is the
+    # default input on most Macs).
     mic = mic_override or (str(devices[0][0]) if devices else "0")
 
-    if mode == "presencial":
+    if mode == "in-person":
         return Devices(mic_source=mic, monitor_source="", input_format="avfoundation")
 
-    # Online e listener precisam do audio de saida, que no Mac vem de um
-    # dispositivo virtual.
+    # Online and listener need output audio, which on Mac comes from a
+    # virtual device.
     if monitor_override:
         monitor = monitor_override
     else:
         idx = _macos_find_loopback(devices)
         if idx is None:
-            listed = ", ".join(f"[{i}] {n}" for i, n in devices) or "(nenhum)"
+            listed = ", ".join(f"[{i}] {n}" for i, n in devices) or "(none)"
             raise AudioError(
-                f"modo {mode} no macOS requer um dispositivo de audio virtual para "
-                "capturar a voz dos participantes (o macOS nao expoe a saida "
-                "nativamente). Instale o BlackHole (https://existential.audio/blackhole/), "
-                "crie um Dispositivo Agregado com ele + sua saida, e use-o como saida "
-                "durante a reuniao.\n"
-                f"Dispositivos de audio detectados: {listed}\n"
-                "Ou use --mode presencial para gravar apenas o microfone."
+                f"mode {mode} on macOS requires a virtual audio device to "
+                "capture the participants' voices (macOS does not expose the output "
+                "natively). Install BlackHole (https://existential.audio/blackhole/), "
+                "create an Aggregate Device with it + your output, and use it as the output "
+                "during the meeting.\n"
+                f"Audio devices detected: {listed}\n"
+                "Or use --mode in-person to record only the microphone."
             )
         monitor = str(idx)
 
     if mode == "listener":
-        # So a saida do sistema (voz dos participantes); o mic nao e gravado.
+        # Only the system output (participants' voices); mic is not recorded.
         return Devices(mic_source="", monitor_source=monitor, input_format="avfoundation")
 
     return Devices(mic_source=mic, monitor_source=monitor, input_format="avfoundation")
@@ -261,20 +260,20 @@ def _macos_describe() -> list[str]:
         lines.append(f"  [{idx}] {name}")
     loop = _macos_find_loopback(devices)
     if loop is not None:
-        lines.append(f"loopback (system audio): indice {loop}")
+        lines.append(f"loopback (system audio): index {loop}")
     else:
         lines.append(
-            "loopback (system audio): nao encontrado (instale o BlackHole para o modo online)"
+            "loopback (system audio): not found (install BlackHole for online mode)"
         )
     return lines
 
 
 # =========================================================================== #
-# Backend Windows (DirectShow)
+# Windows Backend (DirectShow)
 # =========================================================================== #
-# Dispositivos virtuais/de loopback comuns para capturar o audio de saida.
-# "Stereo Mix"/"Mixagem estereo" e o loopback nativo de algumas placas (quando
-# habilitado); VB-CABLE e VoiceMeeter sao dispositivos virtuais de terceiros.
+# Common virtual/loopback devices for capturing output audio.
+# "Stereo Mix" is the native loopback of some soundcards (when
+# enabled); VB-CABLE and VoiceMeeter are third-party virtual devices.
 _WINDOWS_LOOPBACK_HINTS = (
     "stereo mix",
     "mixagem estereo",
@@ -287,21 +286,20 @@ _WINDOWS_LOOPBACK_HINTS = (
     "wave out",
 )
 
-# Linha do -list_devices do dshow: '"Nome do Dispositivo" (audio)' ou, em
-# versoes do ffmpeg, '[dshow @ 0x..] "Nome do Dispositivo"'. Extraimos o nome
-# entre aspas.
+# Line from dshow -list_devices: '"Device Name" (audio)' or, in
+# some ffmpeg versions, '[dshow @ 0x..] "Device Name"'. We extract the name
+# between quotes.
 _DSHOW_DEVICE_RE = re.compile(r'"([^"]+)"')
 
 
 def _windows_list_audio_devices() -> list[str]:
-    """Lista os nomes dos dispositivos de audio de entrada via dshow.
+    """Lists the names of input audio devices via dshow.
 
-    O ffmpeg imprime a lista no stderr e sai com codigo != 0 (comportamento
-    esperado do -list_devices), entao nao usamos check=True aqui.
+    ffmpeg prints the list to stderr and exits with code != 0 (expected behavior
+    of -list_devices), so we don't use check=True here.
 
-    No dshow os dispositivos sao referenciados por nome (nao por indice), e o
-    ffmpeg lista dispositivos de video e audio juntos; filtramos a secao de
-    audio.
+    In dshow, devices are referenced by name (not by index), and ffmpeg lists
+    video and audio devices together; we filter the audio section.
     """
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"],
@@ -313,10 +311,10 @@ def _windows_list_audio_devices() -> list[str]:
     in_audio = False
     for line in text.splitlines():
         low = line.lower()
-        # Cabecalhos de secao variam entre versoes do ffmpeg:
-        # "DirectShow audio devices" / "DirectShow video devices". A linha de
-        # video pode conter "(some may be both video and audio devices)", entao
-        # checamos "video devices" primeiro para nao classifica-la como audio.
+        # Section headers vary between ffmpeg versions:
+        # "DirectShow audio devices" / "DirectShow video devices". The video line
+        # may contain "(some may be both video and audio devices)", so we check
+        # "video devices" first to not misclassify it as audio.
         if "video devices" in low:
             in_audio = False
             continue
@@ -325,7 +323,7 @@ def _windows_list_audio_devices() -> list[str]:
             continue
         if not in_audio:
             continue
-        # Ignora a linha "Alternative name ..." que o ffmpeg imprime.
+        # Ignore the "Alternative name ..." line that ffmpeg prints.
         if "alternative name" in low:
             continue
         m = _DSHOW_DEVICE_RE.search(line)
@@ -335,7 +333,7 @@ def _windows_list_audio_devices() -> list[str]:
 
 
 def _windows_find_loopback(devices: list[str]) -> str | None:
-    """Encontra o nome de um dispositivo de loopback/virtual (Stereo Mix etc.)."""
+    """Finds the name of a loopback/virtual device (Stereo Mix, etc.)."""
     for name in devices:
         if any(hint in name.lower() for hint in _WINDOWS_LOOPBACK_HINTS):
             return name
@@ -346,43 +344,43 @@ def _windows_resolve(mode: str, mic_override: str, monitor_override: str) -> Dev
     devices = _windows_list_audio_devices()
     if not devices and not mic_override:
         raise AudioError(
-            "nenhum dispositivo de audio detectado via dshow. Verifique se o "
-            "microfone esta conectado e habilitado nas Configuracoes de Som do "
-            "Windows, e as permissoes de microfone do app de terminal em "
-            "Configuracoes > Privacidade e seguranca > Microfone."
+            "no audio devices detected via dshow. Check that the "
+            "microphone is connected and enabled in Windows Sound Settings, "
+            "and check the terminal app microphone permissions in "
+            "Settings > Privacy and Security > Microphone."
         )
 
-    # Mic: override explicito, ou o primeiro dispositivo de audio detectado.
+    # Mic: explicit override, or the first detected audio device.
     mic = mic_override or (devices[0] if devices else "")
     mic_arg = f"audio={mic}"
 
-    if mode == "presencial":
+    if mode == "in-person":
         return Devices(mic_source=mic_arg, monitor_source="", input_format="dshow")
 
-    # Online e listener precisam do audio de saida, que no Windows vem de um
-    # dispositivo virtual ou do "Stereo Mix" (quando a placa expoe e ele esta
-    # habilitado).
+    # Online and listener need output audio, which on Windows comes from a
+    # virtual device or "Stereo Mix" (when the soundcard exposes it and it's
+    # enabled).
     if monitor_override:
         monitor = monitor_override
     else:
         found = _windows_find_loopback(devices)
         if found is None:
-            listed = ", ".join(f'"{n}"' for n in devices) or "(nenhum)"
+            listed = ", ".join(f'"{n}"' for n in devices) or "(none)"
             raise AudioError(
-                f"modo {mode} no Windows requer um dispositivo de audio virtual ou o "
-                '"Stereo Mix"/"Mixagem estereo" para capturar a voz dos participantes '
-                "(o dshow nao expoe a saida nativamente). Habilite o Stereo Mix em "
-                "Configuracoes de Som > Gravacao (se sua placa oferecer), ou instale o "
-                "VB-CABLE (https://vb-audio.com/Cable/) ou o VoiceMeeter e roteie a saida "
-                "para ele.\n"
-                f"Dispositivos de audio detectados: {listed}\n"
-                "Ou use --mode presencial para gravar apenas o microfone."
+                f"mode {mode} on Windows requires a virtual audio device or "
+                '"Stereo Mix" to capture the participants\' voices '
+                "(dshow does not expose the output natively). Enable Stereo Mix in "
+                "Sound Settings > Recording (if your soundcard offers it), or install "
+                "VB-CABLE (https://vb-audio.com/Cable/) or VoiceMeeter and route the output "
+                "to it.\n"
+                f"Audio devices detected: {listed}\n"
+                "Or use --mode in-person to record only the microphone."
             )
         monitor = found
 
     monitor_arg = f"audio={monitor}"
     if mode == "listener":
-        # So a saida do sistema (voz dos participantes); o mic nao e gravado.
+        # Only the system output (participants' voices); mic is not recorded.
         return Devices(mic_source="", monitor_source=monitor_arg, input_format="dshow")
     return Devices(mic_source=mic_arg, monitor_source=monitor_arg, input_format="dshow")
 
@@ -397,26 +395,26 @@ def _windows_describe() -> list[str]:
         lines.append(f'loopback (system audio): "{loop}"')
     else:
         lines.append(
-            "loopback (system audio): nao encontrado (habilite o Stereo Mix ou "
-            "instale o VB-CABLE/VoiceMeeter para o modo online)"
+            "loopback (system audio): not found (enable Stereo Mix or "
+            "install VB-CABLE/VoiceMeeter for online mode)"
         )
     return lines
 
 
 # =========================================================================== #
-# API publica (despacha para o backend da plataforma)
+# Public API (dispatches to the platform backend)
 # =========================================================================== #
 def check_dependencies() -> None:
     _check_ffmpeg()
     if _is_macos() or _is_windows():
-        return  # avfoundation/dshow vem embutido no ffmpeg
+        return  # avfoundation/dshow come built into ffmpeg
     _linux_check()
 
 
 def check_device_tooling() -> None:
-    """Verifica apenas as ferramentas de deteccao de dispositivo (sem ffmpeg)."""
+    """Checks only device detection tools (without ffmpeg)."""
     if _is_macos() or _is_windows():
-        _check_ffmpeg()  # no Mac/Windows, a listagem usa o proprio ffmpeg
+        _check_ffmpeg()  # on Mac/Windows, the listing uses ffmpeg itself
     else:
         _linux_check()
 
@@ -426,9 +424,9 @@ def resolve_devices(
     mic_override: str = "",
     monitor_override: str = "",
 ) -> Devices:
-    """Resolve os dispositivos a usar no momento do start.
+    """Resolves the devices to use at start time.
 
-    Overrides do config tem prioridade; vazio = deteccao automatica.
+    Config overrides take priority; empty = automatic detection.
     """
     check_dependencies()
     if _is_macos():
@@ -439,7 +437,7 @@ def resolve_devices(
 
 
 def describe_devices() -> list[str]:
-    """Linhas descritivas dos dispositivos detectados, para o comando `devices`."""
+    """Descriptive lines of detected devices, for the `devices` command."""
     check_device_tooling()
     if _is_macos():
         return _macos_describe()
@@ -449,7 +447,7 @@ def describe_devices() -> list[str]:
 
 
 def _ffmpeg_track_cmd(source: str, output_path: str, input_format: str) -> list[str]:
-    """ffmpeg gravando uma unica fonte para opus mono."""
+    """ffmpeg recording a single source to mono opus."""
     return [
         "ffmpeg",
         "-y",
@@ -463,16 +461,16 @@ def _ffmpeg_track_cmd(source: str, output_path: str, input_format: str) -> list[
 
 
 def import_audio(src, dest) -> None:
-    """Extrai/converte o audio de um arquivo externo para opus mono (24k).
+    """Extracts/converts audio from an external file to mono opus (24k).
 
-    Aceita tanto arquivos de audio (m4a, mp3, wav, opus, etc.) quanto de video
-    (mp4, mkv, mov, etc.): o `-vn` descarta qualquer trilha de video e o ffmpeg
-    extrai apenas o audio, reencodando para o mesmo formato das Tracks gravadas
-    (opus mono 24k) para manter a pipeline homogenea.
+    Accepts both audio files (m4a, mp3, wav, opus, etc.) and video files
+    (mp4, mkv, mov, etc.): the `-vn` flag discards any video track and ffmpeg
+    extracts only the audio, re-encoding to the same format as recorded tracks
+    (mono opus 24k) to keep the pipeline homogeneous.
 
-    Diferente das Tracks gravadas ao vivo, aqui ha uma unica fonte externa
-    (celular, gravador, video de call), entao nao ha separacao de locutor por
-    Track — o modo 'import' gera uma transcricao corrida (sem rotulos).
+    Unlike tracks recorded live, here there is a single external source
+    (mobile phone, recorder, call video), so there is no speaker separation by
+    track — the 'import' mode generates a continuous transcript (without labels).
     """
     _check_ffmpeg()
     from pathlib import Path
@@ -480,13 +478,13 @@ def import_audio(src, dest) -> None:
     src = Path(src)
     dest = Path(dest)
     if not src.exists():
-        raise AudioError(f"arquivo nao encontrado: {src}")
+        raise AudioError(f"file not found: {src}")
 
     cmd = [
         "ffmpeg",
         "-y",
         "-i", str(src),
-        "-vn",              # ignora trilha de video; extrai apenas o audio
+        "-vn",              # ignore video track; extract audio only
         "-ac", "1",
         "-c:a", "libopus",
         "-b:a", "24k",
@@ -495,29 +493,28 @@ def import_audio(src, dest) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         stderr = proc.stderr.strip()
-        detail = stderr.splitlines()[-1] if stderr else "erro desconhecido"
-        raise AudioError(f"falha ao extrair o audio de {src.name}: {detail}")
+        detail = stderr.splitlines()[-1] if stderr else "unknown error"
+        raise AudioError(f"failed to extract audio from {src.name}: {detail}")
     if not dest.exists() or dest.stat().st_size == 0:
         raise AudioError(
-            f"nenhuma trilha de audio encontrada em {src.name}. "
-            "O arquivo contem audio?"
+            f"no audio track found in {src.name}. "
+            "Does the file contain audio?"
         )
 
 
 def start_recording(meeting: Meeting, devices: Devices, mode: str) -> list[int]:
-    """Inicia a gravacao das Tracks em background. Retorna os PIDs do ffmpeg.
+    """Starts recording tracks in background. Returns ffmpeg PIDs.
 
-    Uma Track por processo ffmpeg: garante Tracks separadas (base para a
-    diarizacao nivel 1) e evita mixagem prematura. Quais Tracks sao gravadas
-    depende dos sources resolvidos para o modo: presencial so tem mic, listener
-    so tem system, online tem ambos.
+    One track per ffmpeg process: ensures separate tracks (basis for
+    level 1 diarization) and avoids premature mixing. Which tracks are recorded
+    depends on the sources resolved for the mode: in-person only has mic, listener
+    only has system, online has both.
 
-    Os processos rodam desanexados do terminal (POSIX: nova sessao via
-    start_new_session; Windows: novo grupo de processo) para que o Ctrl+C do
-    terminal nao os atinja diretamente: o encerramento fica sob controle
-    exclusivo de stop_recording (um unico sinal de parada), garantindo que o
-    ffmpeg finalize o container opus corretamente. O stderr vai para um log por
-    Track, util para diagnostico.
+    Processes run detached from the terminal (POSIX: new session via
+    start_new_session; Windows: new process group) so that terminal Ctrl+C doesn't
+    reach them directly: shutdown is under exclusive control of stop_recording
+    (a single stop signal), ensuring ffmpeg finalizes the opus container correctly.
+    stderr goes to a log per track, useful for diagnostics.
     """
     pids: list[int] = []
     fmt = devices.input_format
@@ -552,17 +549,17 @@ def start_recording(meeting: Meeting, devices: Devices, mode: str) -> list[int]:
 
 
 def stop_recording(pids: list[int], timeout: float = 10.0) -> None:
-    """Encerra os ffmpeg com o sinal de parada e aguarda cada um finalizar.
+    """Stops ffmpeg processes with the stop signal and waits for each to finish.
 
-    O sinal (POSIX: SIGINT; Windows: CTRL_BREAK_EVENT) faz o ffmpeg escrever o
-    trailer do container opus e sair. Enviamos apenas um sinal por processo e
-    esperamos ele terminar, para nao corromper a saida com um segundo sinal.
+    The signal (POSIX: SIGINT; Windows: CTRL_BREAK_EVENT) makes ffmpeg write the
+    opus container trailer and exit. We send only one signal per process and
+    wait for it to finish, to avoid corrupting the output with a second signal.
     """
     for pid in pids:
         _send_stop_signal(pid)
 
-    # Aguarda cada processo sair (ate o timeout), para garantir que o container
-    # opus foi finalizado antes de transcrever.
+    # Waits for each process to exit (until timeout), to ensure the opus
+    # container was finalized before transcribing.
     deadline = time.time() + timeout
     for pid in pids:
         while is_running(pid) and time.time() < deadline:
@@ -570,7 +567,7 @@ def stop_recording(pids: list[int], timeout: float = 10.0) -> None:
 
 
 def _windows_is_running(pid: int) -> bool:
-    """Verifica se um PID esta ativo no Windows via OpenProcess/GetExitCodeProcess."""
+    """Checks if a PID is active on Windows via OpenProcess/GetExitCodeProcess."""
     import ctypes
 
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
@@ -599,7 +596,7 @@ def is_running(pid: int) -> bool:
     return True
 
 
-# Extrai o ultimo "size=  123kB" e o ultimo "time=00:00:12.34" do log do ffmpeg.
+# Extracts the last "size=  123kB" and the last "time=00:00:12.34" from ffmpeg log.
 _SIZE_RE = re.compile(r"size=\s*(\d+)\s*([kKmMgG]?i?)B")
 _TIME_RE = re.compile(r"time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
@@ -607,13 +604,13 @@ _SIZE_UNIT = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 
 
 def read_progress(log_paths: list) -> tuple[int, float]:
-    """Le o tamanho (bytes) e o tempo (segundos) capturados dos logs do ffmpeg.
+    """Reads the size (bytes) and time (seconds) captured from ffmpeg logs.
 
-    O muxer opus so descarrega os dados no arquivo ao finalizar, entao o tamanho
-    em disco fica 0 durante a gravacao. O log do ffmpeg, porem, reporta o
-    'size=' e 'time=' correntes — usamos ele como fonte de verdade ao vivo.
+    The opus muxer only flushes data to the file when finalizing, so disk size
+    remains 0 during recording. The ffmpeg log, however, reports the current
+    'size=' and 'time=' — we use it as the live source of truth.
 
-    Retorna (soma_bytes, maior_tempo) agregando todas as Tracks.
+    Returns (total_bytes, max_time) by aggregating all tracks.
     """
     total_bytes = 0
     max_time = 0.0

@@ -1,23 +1,23 @@
-"""Monta o prompt multilingue enviado ao LLM Provider.
+"""Builds the multilingual prompt sent to the LLM Provider.
 
-O Summary e produzido diretamente em Markdown pelo LLM, entre sentinelas que
-permitem extracao robusta mesmo quando o CLI adiciona banners/ANSI/texto extra.
+The Summary is produced directly in Markdown by the LLM, between sentinels that
+allow robust extraction even when the CLI adds banners/ANSI/extra text.
 """
 
 from __future__ import annotations
 
-# Sentinelas que delimitam o Markdown do Summary na saida do LLM.
-BEGIN_MARK = "===NOTETAKER-RESUMO-INICIO==="
-END_MARK = "===NOTETAKER-RESUMO-FIM==="
+# Sentinels that delimit the Markdown of the Summary in the LLM output.
+BEGIN_MARK = "===NOTETAKER-SUMMARY-START==="
+END_MARK = "===NOTETAKER-SUMMARY-END==="
 
-# Nome do idioma alvo por codigo, para instruir o LLM.
+# Target language name by code, to instruct the LLM.
 _LANG_NAME = {
-    "pt": "portugues do Brasil",
-    "es": "espanhol",
-    "en": "ingles",
+    "pt": "Brazilian Portuguese",
+    "es": "Spanish",
+    "en": "English",
 }
 
-# Titulos das secoes por idioma (o LLM deve usar exatamente estes).
+# Section titles by language (the LLM must use exactly these).
 _SECTIONS = {
     "pt": ["Resumo Executivo", "Pontos Discutidos", "Decisoes", "Tarefas", "Observacoes"],
     "es": ["Resumen Ejecutivo", "Puntos Discutidos", "Decisiones", "Tareas", "Observaciones"],
@@ -26,9 +26,9 @@ _SECTIONS = {
 
 
 def resolve_output_language(output_lang: str, meeting_lang: str) -> str:
-    """Resolve o idioma de saida do Summary.
+    """Resolve the output language of the Summary.
 
-    output_lang pode ser 'meeting' (segue a Meeting Language) ou pt/es/en.
+    output_lang can be 'meeting' (follows the Meeting Language) or pt/es/en.
     """
     if output_lang and output_lang != "meeting":
         return output_lang
@@ -38,7 +38,7 @@ def resolve_output_language(output_lang: str, meeting_lang: str) -> str:
 
 
 def build_prompt(transcript: str, output_lang: str, title: str = "") -> str:
-    """Monta o prompt completo: instrucoes + estrutura Markdown + transcricao."""
+    """Build the complete prompt: instructions + Markdown structure + transcript."""
     lang = output_lang if output_lang in _SECTIONS else "pt"
     lang_name = _LANG_NAME[lang]
     s = _SECTIONS[lang]
@@ -46,41 +46,41 @@ def build_prompt(transcript: str, output_lang: str, title: str = "") -> str:
                         "en": "Meeting Summary"}[lang]
 
     return f"""\
-Voce e um assistente que resume reunioes a partir de uma transcricao.
+You are an assistant that summarizes meetings from a transcript.
 
-A transcricao esta rotulada por locutor (ex.: [Voce], [Participantes]). Use
-esses rotulos para atribuir tarefas ao responsavel correto.
+The transcript is labeled by speaker (e.g., [You], [Participants]). Use
+these labels to assign tasks to the correct responsible person.
 
-Gere um resumo estruturado em Markdown, ESCRITO EM {lang_name.upper()}.
+Generate a structured summary in Markdown, WRITTEN IN {lang_name.upper()}.
 
-Escreva o Markdown entre as duas linhas sentinela abaixo, sem nenhum outro texto
-antes ou depois delas:
+Write the Markdown between the two sentinel lines below, with no other text
+before or after them:
 
 {BEGIN_MARK}
 # {heading}
 
 ## {s[0]}
-(2 a 3 frases resumindo a reuniao)
+(2 to 3 sentences summarizing the meeting)
 
 ## {s[1]}
-(lista de topicos objetivos, um por linha com "- ")
+(list of objective topics, one per line with "- ")
 
 ## {s[2]}
-(apenas o que foi efetivamente decidido; "- " por item)
+(only what was effectively decided; "- " per item)
 
 ## {s[3]}
-(cada acao concreta como "- descricao (responsavel; prazo)"; use "-" quando nao houver prazo)
+(each concrete action as "- description (responsible person; deadline)"; use "-" when there is no deadline)
 
 ## {s[4]}
-(riscos, duvidas em aberto, itens a acompanhar; "- " por item)
+(risks, open questions, items to track; "- " per item)
 {END_MARK}
 
-Regras:
-- Use exatamente esses titulos de secao e nessa ordem.
-- Se uma secao nao tiver conteudo, escreva "- (nenhum)".
-- Nao inclua blocos de codigo, apenas Markdown de texto.
+Rules:
+- Use exactly these section titles and in this order.
+- If a section has no content, write "- (none)".
+- Do not include code blocks, only text Markdown.
 
-Transcricao da reuniao:
+Meeting transcript:
 ---
 {transcript}
 ---

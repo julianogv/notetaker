@@ -1,7 +1,7 @@
-"""Pipeline batch executado apos o stop: transcricao -> diarizacao -> Summary.
+"""Batch pipeline executed after stop: transcription -> diarization -> Summary.
 
-Roda de forma sincrona (a CLI a dispara em background via subprocess desanexado),
-atualizando o meta.json a cada fase para permitir acompanhamento via `status`.
+Runs synchronously (the CLI dispatches it in background via detached subprocess),
+updating meta.json at each phase to allow tracking via `status`.
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ from .prompts import resolve_output_language
 from .storage import Meeting
 from .summarize import generate_summary
 
-# Callback de progresso: recebe (fase, mensagem). fase e um identificador
-# estavel ('transcribing_mic', 'transcribing_system', 'diarizing',
-# 'summarizing', 'done'); mensagem e texto legivel para exibir ao usuario.
+# Progress callback: receives (phase, message). phase is a stable identifier
+# ('transcribing_mic', 'transcribing_system', 'diarizing',
+# 'summarizing', 'done'); message is human-readable text to display to the user.
 ProgressCb = Callable[[str, str], None]
 
 
@@ -27,12 +27,12 @@ def _noop(phase: str, message: str) -> None:  # pragma: no cover
 
 
 def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> None:
-    """Executa transcricao, diarizacao nivel 1/2 e geracao do Summary."""
+    """Executes transcription, level 1/2 diarization, and Summary generation."""
     report = progress or _noop
     meta = meeting.read_meta()
 
     try:
-        # --- Transcricao das Tracks ---
+        # --- Transcription of tracks ---
         meta.status = "transcribing"
         meeting.write_meta(meta)
 
@@ -41,13 +41,13 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
         timings: dict[str, dict] = {}
 
         device, _ = transcribe.detect_compute_device()
-        report("device", f"  transcricao usando: {device.upper()} (modelo {meta.whisper_model})")
+        report("device", f"  transcribing using: {device.upper()} (model {meta.whisper_model})")
 
         def _fmt(s: "transcribe.TranscribeStats") -> str:
             return (
-                f"{s.audio_seconds:.0f}s de audio em {s.transcribe_seconds:.0f}s "
+                f"{s.audio_seconds:.0f}s of audio in {s.transcribe_seconds:.0f}s "
                 f"(RTF {s.rtf:.2f}x"
-                + (f", modelo carregou em {s.model_load_seconds:.0f}s" if s.model_load_seconds > 0.5 else "")
+                + (f", model loaded in {s.model_load_seconds:.0f}s" if s.model_load_seconds > 0.5 else "")
                 + ")"
             )
 
@@ -57,10 +57,10 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
         if has_mic and has_system:
             gpu = transcribe.gpu_available()
             if gpu:
-                # GPU: a paralelizacao por threads de CPU nao ajuda e duplicaria o
-                # uso de VRAM. Transcreve sequencialmente com o modelo em cache;
-                # a GPU ja e rapida (RTF baixo).
-                report("transcribing", "transcrevendo as duas trilhas (GPU)...")
+                # GPU: CPU thread parallelization doesn't help and would duplicate
+                # VRAM usage. Transcribe sequentially with cached model;
+                # the GPU is already fast (low RTF).
+                report("transcribing", "transcribing both tracks (GPU)...")
                 mic_t = transcribe.transcribe_track(
                     meeting.audio_mic, meta.whisper_model, meta.lang
                 )
@@ -68,13 +68,13 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
                     meeting.audio_system, meta.whisper_model, meta.lang
                 )
             else:
-                # CPU: transcreve em paralelo com modelos separados, cada um
-                # limitado a metade dos cores. O CTranslate2 ja satura os cores,
-                # entao dividir os threads evita contencao e reduz o tempo total
-                # (vs. sequencial). Os modelos sao carregados sequencialmente antes
-                # (o carregador nao e seguro para uso concorrente) e a transcricao
-                # roda em threads.
-                report("transcribing", "transcrevendo as duas trilhas em paralelo...")
+                # CPU: transcribe in parallel with separate models, each limited
+                # to half the cores. CTranslate2 already saturates the cores,
+                # so dividing threads avoids contention and reduces total time
+                # (vs. sequential). Models are loaded sequentially first
+                # (the loader is not thread-safe for concurrent use) and transcription
+                # runs in threads.
+                report("transcribing", "transcribing both tracks in parallel...")
                 half = max(1, (os.cpu_count() or 2) // 2)
                 model_mic = transcribe.load_model(meta.whisper_model, cpu_threads=half)
                 model_system = transcribe.load_model(meta.whisper_model, cpu_threads=half)
@@ -98,7 +98,7 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
             report("stats_system", "  system: " + _fmt(system_t.stats))
 
         elif has_mic:
-            report("transcribing_mic", "transcrevendo sua fala (mic)...")
+            report("transcribing_mic", "transcribing your speech (mic)...")
             mic_t = transcribe.transcribe_track(
                 meeting.audio_mic, meta.whisper_model, meta.lang
             )
@@ -107,7 +107,7 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
             report("stats_mic", "  mic: " + _fmt(mic_t.stats))
 
         elif has_system:
-            report("transcribing_system", "transcrevendo os participantes (system)...")
+            report("transcribing_system", "transcribing the participants (system)...")
             system_t = transcribe.transcribe_track(
                 meeting.audio_system, meta.whisper_model, meta.lang
             )
@@ -119,17 +119,17 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
 
         primary = mic_t or system_t
         if primary is None:
-            raise RuntimeError("nenhuma Track de audio encontrada para transcrever")
+            raise RuntimeError("no audio track found to transcribe")
 
-        # Meeting Language efetiva: idioma detectado na Track mic (ou system).
+        # Effective meeting language: language detected in mic track (or system).
         detected = primary.language
         meta.detected_lang = detected
 
-        # --- Diarizacao ---
-        report("diarizing", "organizando a transcricao por locutor...")
+        # --- Diarization ---
+        report("diarizing", "organizing transcript by speaker...")
         if meta.mode == "import":
-            # Fonte unica externa (celular, video): sem separacao por Track, logo
-            # sem diarizacao nivel 1. Transcricao corrida, sem rotulos.
+            # Single external source (mobile phone, video): no track separation, so
+            # no level 1 diarization. Continuous transcript, without labels.
             full_text = diarize.render_plain(primary)
         else:
             if meta.diarization == "level2":
@@ -142,7 +142,7 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
         meta.status = "summarizing"
         meeting.write_meta(meta)
 
-        report("summarizing", "gerando o resumo com o LLM...")
+        report("summarizing", "generating summary with LLM...")
         out_lang = resolve_output_language(meta.output_lang, detected)
         md = generate_summary(
             full_text,
@@ -150,11 +150,11 @@ def process_meeting(meeting: Meeting, progress: ProgressCb | None = None) -> Non
             out_lang,
             title=meta.title,
         )
-        meeting.resumo_md.write_text(md, encoding="utf-8")
+        meeting.summary_md.write_text(md, encoding="utf-8")
 
         meta.status = "done"
         meeting.write_meta(meta)
-        report("done", "concluido")
+        report("done", "completed")
 
     except Exception as exc:  # noqa: BLE001
         meta.status = "error"
