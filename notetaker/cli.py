@@ -360,9 +360,9 @@ def cmd_devices(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 def cmd_summarize(args: argparse.Namespace) -> int:
     cfg = load_config()
-    meeting = resolve_meeting(cfg.storage_root, args.pasta)
+    meeting = resolve_meeting(cfg.storage_root, args.folder)
     if meeting is None:
-        return _err(f"meeting not found: {args.pasta}")
+        return _err(f"meeting not found: {args.folder}")
     if not meeting.transcript_full.exists():
         return _err("transcript-full.txt not found; run the pipeline first.")
 
@@ -390,9 +390,9 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 def cmd_retry(args: argparse.Namespace) -> int:
     cfg = load_config()
-    meeting = resolve_meeting(cfg.storage_root, args.pasta)
+    meeting = resolve_meeting(cfg.storage_root, args.folder)
     if meeting is None:
-        return _err(f"meeting not found: {args.pasta}")
+        return _err(f"meeting not found: {args.folder}")
     if not meeting.audio_mic.exists() and not meeting.audio_system.exists():
         return _err("no audio tracks found; nothing to reprocess.")
 
@@ -425,7 +425,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     """
     cfg = load_config()
 
-    src = Path(args.arquivo).expanduser()
+    src = Path(args.file).expanduser()
     if not src.exists():
         return _err(f"file not found: {src}")
     if not src.is_file():
@@ -604,7 +604,7 @@ def build_parser() -> argparse.ArgumentParser:
     su.set_defaults(func=cmd_setup)
 
     sm = sub.add_parser("summarize", help="regenerate summary from transcript")
-    sm.add_argument("folder", dest="pasta", help="meeting folder (name or path)")
+    sm.add_argument("folder", help="meeting folder (name or path)")
     sm.add_argument("--output-lang", dest="output_lang",
                     choices=["meeting", "pt", "es", "en"], default="")
     sm.set_defaults(func=cmd_summarize)
@@ -613,7 +613,7 @@ def build_parser() -> argparse.ArgumentParser:
         "retry",
         help="reprocess a meeting (transcription, diarization, and summary) that failed",
     )
-    rt.add_argument("folder", dest="pasta", help="meeting folder (name or path)")
+    rt.add_argument("folder", help="meeting folder (name or path)")
     rt.add_argument("--wait", action="store_true",
                     help="process in foreground instead of background")
     rt.set_defaults(func=cmd_retry)
@@ -622,7 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
         "import",
         help="transcribe and summarize an external audio/video file (phone, etc.)",
     )
-    im.add_argument("file", dest="arquivo", help="path to audio or video file to import")
+    im.add_argument("file", help="path to audio or video file to import")
     im.add_argument("--title", default="",
                     help="meeting title (default: filename)")
     im.add_argument("--lang", choices=["auto", "pt", "es", "en"], default="")
