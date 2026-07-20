@@ -73,27 +73,184 @@ def _run_processing(meeting: Meeting) -> int:
     return 0
 
 
-def _watch_recording(meeting: Meeting) -> None:
-    """Live monitoring: spinner + elapsed time + audio size.
+# Recording modes and the live mode-switch menu keys.
+_MODE_KEYS = {"o": "online", "i": "in-person", "l": "listener"}
+
+
+class _KeyReader:
+    """Reads single keystrokes (without Enter) during the watch, restoring the
+    terminal on exit.
+
+    No-op when stdin is not a TTY (pipe, chained script): in that case the watch
+    keeps working with Ctrl+C only, and getch just sleeps to preserve the loop's
+    pacing.
+
+    POSIX: cbreak mode via termios — turns off echo and canonical mode, but keeps
+    ISIG, so terminal Ctrl+C still raises KeyboardInterrupt (the normal way to
+    stop the recording). Windows: msvcrt.
+    """
+
+    def __init__(self) -> None:
+        self._is_windows = audio._is_windows()
+        self.enabled = sys.stdin.isatty()
+        self._posix = self.enabled and not self._is_windows
+        self._fd: int | None = None
+        self._old = None
+
+    def __enter__(self) -> "_KeyReader":
+        if self._posix:
+            import termios
+            import tty
+
+            self._fd = sys.stdin.fileno()
+            self._old = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._posix and self._old is not None:
+            import termios
+
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+
+    def getch(self, timeout: float = 0.0) -> str | None:
+        """Returns a key if pressed within `timeout`s; otherwise None.
+
+        Outside a TTY, sleeps `timeout` and returns None (keeps the loop's pace).
+        """
+        if not self.enabled:
+            time.sleep(timeout)
+            return None
+        if self._posix:
+            import select
+
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+            if ready:
+                return sys.stdin.read(1)
+            return None
+        # Windows: poll msvcrt until a key or the timeout.
+        import msvcrt
+
+        deadline = time.monotonic() + timeout
+        while True:
+            if msvcrt.kbhit():
+                return msvcrt.getwch()
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
+
+
+def _apply_mode_switch(meeting: Meeting, new_mode: str, cfg: Config) -> str:
+    """Turns tracks on/off to reflect `new_mode` without stopping the recording.
+
+    A mode only defines which tracks are recorded (mic and/or system). Switching
+    mode therefore means turning on the missing tracks and turning off the extra
+    ones. A track turned on now gets silence padding (pad_seconds) equal to the
+    elapsed time, to stay aligned with t=0 of the others (diarization assumes
+    tracks start together).
+
+    Limitation: turning a track back on that already recorded before (e.g.
+    online->listener->online) overwrites its file (ffmpeg -y), losing the earlier
+    part. The common case (a single switch during the meeting) is unaffected.
+
+    Returns a result message to show the user.
+    """
+    meta = meeting.read_meta()
+    if meta.mode == new_mode:
+        return f"already in {new_mode} mode."
+    try:
+        devices = audio.resolve_devices(
+            new_mode, cfg.audio.mic_source, cfg.audio.monitor_source
+        )
+    except audio.AudioError as exc:
+        return f"failed to switch mode: {exc}"
+
+    try:
+        started = datetime.fromisoformat(meta.created_at)
+        elapsed = max(0.0, (datetime.now() - started).total_seconds())
+    except Exception:
+        elapsed = 0.0
+
+    fmt = devices.input_format
+
+    # mic track
+    want_mic = bool(devices.mic_source)
+    have_mic = bool(meta.mic_pid) and audio.is_running(meta.mic_pid)
+    if want_mic and not have_mic:
+        meta.mic_pid = audio.start_track(
+            devices.mic_source, meeting.audio_mic, meeting.ffmpeg_log_mic, fmt,
+            pad_seconds=elapsed,
+        )
+        meta.mic_source = devices.mic_source
+    elif have_mic and not want_mic:
+        audio.stop_track(meta.mic_pid)
+        meta.mic_pid = 0
+
+    # system track
+    want_sys = bool(devices.monitor_source)
+    have_sys = bool(meta.system_pid) and audio.is_running(meta.system_pid)
+    if want_sys and not have_sys:
+        meta.system_pid = audio.start_track(
+            devices.monitor_source, meeting.audio_system, meeting.ffmpeg_log_system,
+            fmt, pad_seconds=elapsed,
+        )
+        meta.monitor_source = devices.monitor_source
+    elif have_sys and not want_sys:
+        audio.stop_track(meta.system_pid)
+        meta.system_pid = 0
+
+    meta.mode = new_mode
+    meta.ffmpeg_pids = [p for p in (meta.mic_pid, meta.system_pid) if p]
+    meeting.write_meta(meta)
+    return f"mode switched to {new_mode}."
+
+
+def _mode_switch_menu(meeting: Meeting, cfg: Config, reader: _KeyReader) -> None:
+    """Mode-switch menu triggered by the 'm' key during the watch."""
+    meta = meeting.read_meta()
+    ui.clear_line()
+    print(f"\nswitch mode (current: {meta.mode}):")
+    print("  [o] online   [i] in-person   [l] listener   [esc] cancel")
+    while True:
+        ch = reader.getch(timeout=15.0)
+        if ch is None or ch in ("\x1b", "\r", "\n", "c"):  # esc/enter/c/timeout
+            print("cancelled.")
+            return
+        new_mode = _MODE_KEYS.get(ch.lower())
+        if new_mode is None:
+            continue  # invalid key: wait for another
+        print(_apply_mode_switch(meeting, new_mode, cfg))
+        return
+
+
+def _watch_recording(meeting: Meeting, cfg: Config) -> None:
+    """Live monitoring: spinner + elapsed time + audio size + mode.
 
     Blocks until Ctrl+C. Does not stop the recording here (caller handles it).
+    In a TTY, the 'm' key opens the mode-switch menu without stopping recording.
 
-    Size/time come from ffmpeg logs (read_progress): the opus muxer only
-    writes bytes to the file on finalization, so disk size stays 0 during
-    capture. The log reports current progress.
+    Size/time come from ffmpeg logs (read_progress), which report current progress
+    continuously (the file on disk also grows live thanks to -flush_packets).
     """
     logs = [meeting.ffmpeg_log_mic, meeting.ffmpeg_log_system]
     frames = ui._frames()
     i = 0
-    while True:
-        frame = frames[i % len(frames)]
-        size, elapsed = audio.read_progress(logs)
-        ui.status_line(
-            f"{frame} recording  {ui.format_duration(elapsed)}  "
-            f"audio: {ui.format_size(size)}  (Ctrl+C to stop)"
-        )
-        i += 1
-        time.sleep(0.2)
+    current_mode = meeting.read_meta().mode
+    with _KeyReader() as reader:
+        hint = ("m switch mode, Ctrl+C to stop"
+                if reader.enabled else "Ctrl+C to stop")
+        while True:
+            frame = frames[i % len(frames)]
+            size, elapsed = audio.read_progress(logs)
+            ui.status_line(
+                f"{frame} recording [{current_mode}]  {ui.format_duration(elapsed)}  "
+                f"audio: {ui.format_size(size)}  ({hint})"
+            )
+            i += 1
+            ch = reader.getch(timeout=0.2)
+            if ch and ch.lower() == "m":
+                _mode_switch_menu(meeting, cfg, reader)
+                current_mode = meeting.read_meta().mode
 
 
 def _dispatch_background_processing(meeting: Meeting) -> None:
@@ -123,14 +280,22 @@ def _finalize_stopped_meta(meeting: Meeting) -> Meta:
     return meta
 
 
-def _prompt_active_conflict(active: Meeting) -> str:
-    """Ask what to do when a meeting is already recording.
+def _prompt_active_conflict(active: Meeting, live: bool = True) -> str:
+    """Ask what to do when a meeting is already recording (or was interrupted).
 
-    Returns 'stop' (stop current and start new), 'stop_only' (stop current only,
-    don't start new), 'new' (start in new folder, keep current recording), or
-    'abort' (cancel). Only called when there's an interactive terminal.
+    `live` indicates whether the recording is still in progress (ffmpeg alive) or
+    it crashed. Returns 'stop' (stop current and start new), 'stop_only' (stop
+    current only, don't start new), 'new' (start in new folder, keep current
+    recording), or 'abort' (cancel). Only called when there's an interactive
+    terminal.
     """
-    print(f"a meeting is already recording: {active.path.name}.")
+    if live:
+        print(f"a meeting is already recording: {active.path.name}.")
+    else:
+        print(
+            f"there is an interrupted recording (it crashed): {active.path.name}. "
+            "The audio on disk was preserved."
+        )
     print("  [s] stop current recording and start a new one")
     print("  [o] stop current recording only (don't start new)")
     print("  [n] start in a new folder (keep current recording)")
@@ -159,14 +324,20 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     active = find_active_meeting(cfg.storage_root)
     if active:
+        live = audio.any_recording_alive(active.read_meta().ffmpeg_pids)
         # Without interactive terminal (script, pipe, --no-watch chained) cannot
         # ask: maintain safe behavior of not touching the running recording.
         if not sys.stdin.isatty():
+            if live:
+                return _err(
+                    f"a meeting is already recording: {active.path.name}. "
+                    "Run 'notetaker stop'."
+                )
             return _err(
-                f"a meeting is already recording: {active.path.name}. "
-                "Run 'notetaker stop'."
+                f"there is an interrupted recording: {active.path.name}. "
+                "Run 'notetaker list --retry' to recover it (or 'notetaker stop')."
             )
-        decision = _prompt_active_conflict(active)
+        decision = _prompt_active_conflict(active, live)
         if decision == "abort":
             print("cancelled; the running recording was kept.")
             return 1
@@ -215,7 +386,9 @@ def cmd_start(args: argparse.Namespace) -> int:
         meeting.write_meta(meta)
         return _err(str(exc))
 
-    meta.ffmpeg_pids = pids
+    meta.mic_pid = pids["mic"]
+    meta.system_pid = pids["system"]
+    meta.ffmpeg_pids = [p for p in (pids["mic"], pids["system"]) if p]
     meeting.write_meta(meta)
 
     ui.log(f"recording: {meeting.path.name}")
@@ -231,9 +404,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         ui.log("run 'notetaker stop' to stop recording and generate the summary.")
         return 0
 
+    if sys.stdin.isatty():
+        print("  (press 'm' to switch recording mode without stopping)")
+
     # Watch mode (default): live monitoring until Ctrl+C, then process.
     try:
-        _watch_recording(meeting)
+        _watch_recording(meeting, cfg)
     except KeyboardInterrupt:
         pass
 
@@ -329,17 +505,208 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# list
+# list / pending summaries / crash recovery
 # --------------------------------------------------------------------------- #
+def _nonempty(path: Path) -> bool:
+    """True if the file exists and has content (> 0 bytes)."""
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _summary_category(meeting: Meeting, meta: Meta) -> str:
+    """Categorizes a meeting by processing state, to guide the action:
+
+    'recording'             -> recording in progress (ffmpeg alive; don't touch).
+    'interrupted recording' -> meta status 'recording' but no ffmpeg alive: the
+                               recording crashed (kill/hibernation/power loss). The
+                               audio on disk survived (-flush_packets). Acted on by
+                               --retry.
+    'ok'                    -> summary.md already exists and is not empty.
+    'summary pending'       -> transcript exists, but the summary wasn't finished
+                               (e.g. the laptop died during summarization).
+                               Acted on by --summarize.
+    'transcription pending' -> audio exists, but the transcript is empty/missing
+                               (nothing to summarize yet). Acted on by --retry.
+    'no audio'              -> neither audio nor transcript.
+    """
+    if meta.status == "recording":
+        if audio.any_recording_alive(meta.ffmpeg_pids):
+            return "recording"
+        return "interrupted recording"
+    if _nonempty(meeting.summary_md):
+        return "ok"
+    if _nonempty(meeting.transcript_full):
+        return "summary pending"
+    if meeting.audio_mic.exists() or meeting.audio_system.exists():
+        return "transcription pending"
+    return "no audio"
+
+
+def _meetings_in(path: Path) -> list[Meeting]:
+    """Meetings inside `path`.
+
+    Accepts both a storage root (several meetings in subfolders) and the path of
+    a single meeting (the folder itself has meta.json).
+    """
+    path = path.expanduser()
+    if Meeting(path=path).meta_path.exists():
+        return [Meeting(path=path)]
+    return list_meetings(path)
+
+
+def _generate_summary_for(
+    meeting: Meeting, cfg: Config, output_lang: str = ""
+) -> Path:
+    """Generate/regenerate summary.md from the existing transcript-full.
+
+    Returns the summary path. Raises RuntimeError if there is no usable
+    transcript. Marks the meeting as 'done' and clears any prior error on success.
+    """
+    from .summarize import generate_summary
+
+    if not _nonempty(meeting.transcript_full):
+        raise RuntimeError("transcript-full.txt missing or empty")
+
+    meta = meeting.read_meta()
+    transcript = meeting.transcript_full.read_text(encoding="utf-8")
+    out_lang = resolve_output_language(
+        output_lang or meta.output_lang, meta.detected_lang or meta.lang
+    )
+    llm_command = meta.extra.get(
+        "llm_command", resolve_llm_command(cfg.llm.provider, cfg.llm.model)
+    )
+    md = generate_summary(transcript, llm_command, out_lang, title=meta.title)
+
+    meeting.summary_md.write_text(md, encoding="utf-8")
+    meta.status = "done"
+    meta.error = ""
+    meeting.write_meta(meta)
+    return meeting.summary_md
+
+
+def _summarize_pending(
+    pend: list[Meeting], cfg: Config, output_lang: str, root: Path
+) -> int:
+    """Generate, in sequence, the summaries of meetings with a pending summary."""
+    if not pend:
+        print(f"no pending summaries in {root}.")
+        return 0
+    ui.log(f"generating {len(pend)} pending summary(ies)...")
+    ok = 0
+    for m in pend:
+        spinner = ui.Spinner(f"summarizing {m.path.name}...").start()
+        try:
+            _generate_summary_for(m, cfg, output_lang)
+            spinner.stop(f"  ok: {m.path.name}")
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            spinner.stop(f"  failed: {m.path.name} ({exc})")
+    ui.log(f"{ok}/{len(pend)} summary(ies) generated.")
+    return 0
+
+
+def _finalize_crashed_meta(meeting: Meeting, meta: Meta) -> None:
+    """Safely finalize a recording interrupted by a crash.
+
+    Signals any leftover ffmpeg (stop_recording ignores stale PIDs), derives
+    stopped_at/duration from the log (the real captured time), and clears the
+    PIDs. Leaves the meta ready to reprocess from the audio left on disk.
+    """
+    audio.stop_recording(meta.ffmpeg_pids)  # only hits live ffmpeg; rest is no-op
+    _bytes, elapsed = audio.read_progress(
+        [meeting.ffmpeg_log_mic, meeting.ffmpeg_log_system]
+    )
+    if elapsed and not meta.duration_seconds:
+        meta.duration_seconds = elapsed
+    if not meta.stopped_at:
+        meta.stopped_at = datetime.now().isoformat(timespec="seconds")
+    meta.ffmpeg_pids = []
+    meta.mic_pid = 0
+    meta.system_pid = 0
+
+
+def _retry_pending(pend: list[Meeting], cfg: Config) -> int:
+    """Reprocess, in sequence (one at a time), the meetings that have audio but
+    didn't reach a summary: transcription pending and interrupted recordings.
+
+    Sequential on purpose: each retry runs Whisper, so processing in parallel
+    would saturate CPU/GPU. Runs in the foreground, showing each meeting's
+    progress, instead of dispatching to background.
+    """
+    if not pend:
+        print("nothing to reprocess.")
+        return 0
+    ui.log(f"reprocessing {len(pend)} recording(s) (one at a time)...")
+    ok = 0
+    for i, m in enumerate(pend, 1):
+        print(f"\n[{i}/{len(pend)}] {m.path.name}")
+        meta = m.read_meta()
+        if meta.status == "recording":
+            # interrupted recording: safely finalize before processing.
+            _finalize_crashed_meta(m, meta)
+        meta.error = ""
+        meta.status = "transcribing"
+        m.write_meta(meta)
+        if _run_processing(m) == 0:
+            ok += 1
+    ui.log(f"{ok}/{len(pend)} reprocessed successfully.")
+    return 0
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     cfg = load_config()
-    meetings = list_meetings(cfg.storage_root)
+    root = Path(args.dir).expanduser() if args.dir else cfg.storage_root
+    meetings = _meetings_in(root)
     if not meetings:
-        print("no meetings found.")
+        print(f"no meetings found in {root}")
         return 0
+
+    rows = []
     for m in meetings:
         meta = m.read_meta()
-        print(f"{m.path.name:50s} [{meta.status}]")
+        rows.append((m, meta, _summary_category(m, meta)))
+    pend_summary = [m for m, _meta, cat in rows if cat == "summary pending"]
+    pend_transc = [m for m, _meta, cat in rows if cat == "transcription pending"]
+    crashed = [m for m, _meta, cat in rows if cat == "interrupted recording"]
+    # --retry recovers everything that has audio but didn't reach a summary.
+    recoverable = crashed + pend_transc
+
+    if args.retry:
+        return _retry_pending(recoverable, cfg)
+    if args.summarize:
+        return _summarize_pending(pend_summary, cfg, args.output_lang, root)
+
+    shown = rows
+    if args.pending:
+        shown = [r for r in rows if r[2] == "summary pending"]
+    elif args.pending_transcription:
+        shown = [r for r in rows if r[2] == "transcription pending"]
+    if not shown:
+        print(f"nothing to show in {root}.")
+        return 0
+
+    for m, meta, cat in shown:
+        print(f"{m.path.name:48s} [{meta.status:12s}] {cat}")
+
+    # Action hints (only in the full, unfiltered listing).
+    if not args.pending and not args.pending_transcription:
+        if pend_summary:
+            print(
+                f"\n{len(pend_summary)} with a pending summary. "
+                "Run 'notetaker list --summarize' to generate them."
+            )
+        if recoverable:
+            detail = []
+            if pend_transc:
+                detail.append(f"{len(pend_transc)} transcription pending")
+            if crashed:
+                detail.append(f"{len(crashed)} interrupted recording")
+            print(
+                f"{len(recoverable)} to reprocess ({', '.join(detail)}). "
+                "Run 'notetaker list --retry'."
+            )
     return 0
 
 
@@ -363,25 +730,13 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     meeting = resolve_meeting(cfg.storage_root, args.folder)
     if meeting is None:
         return _err(f"meeting not found: {args.folder}")
-    if not meeting.transcript_full.exists():
-        return _err("transcript-full.txt not found; run the pipeline first.")
-
-    from .summarize import generate_summary
-
-    meta = meeting.read_meta()
-    transcript = meeting.transcript_full.read_text(encoding="utf-8")
-    out_lang = resolve_output_language(
-        args.output_lang or meta.output_lang, meta.detected_lang or meta.lang
-    )
-    llm_command = meta.extra.get("llm_command", resolve_llm_command(cfg.llm.provider, cfg.llm.model))
 
     try:
-        md = generate_summary(transcript, llm_command, out_lang, title=meta.title)
+        path = _generate_summary_for(meeting, cfg, args.output_lang)
     except Exception as exc:  # noqa: BLE001
         return _err(str(exc))
 
-    meeting.summary_md.write_text(md, encoding="utf-8")
-    ui.log(f"summary regenerated: {meeting.summary_md}")
+    ui.log(f"summary regenerated: {path}")
     return 0
 
 
@@ -597,7 +952,25 @@ def build_parser() -> argparse.ArgumentParser:
     stt = sub.add_parser("status", help="show status of the most recent meeting")
     stt.set_defaults(func=cmd_status)
 
-    ls = sub.add_parser("list", help="list meetings")
+    ls = sub.add_parser(
+        "list", help="list meetings (and optionally generate pending summaries)"
+    )
+    ls.add_argument("--dir", default="",
+                    help="folder to list (default: storage_root from config); "
+                         "accepts the root or the path of a single meeting")
+    ls.add_argument("--pending", action="store_true",
+                    help="show only meetings with a pending summary")
+    ls.add_argument("--pending-transcription", dest="pending_transcription",
+                    action="store_true",
+                    help="show only meetings with a pending transcription")
+    ls_action = ls.add_mutually_exclusive_group()
+    ls_action.add_argument("--summarize", action="store_true",
+                           help="generate the pending summaries in the folder")
+    ls_action.add_argument("--retry", action="store_true",
+                           help="reprocess (one at a time) meetings with pending "
+                                "transcription or interrupted recordings")
+    ls.add_argument("--output-lang", dest="output_lang",
+                    choices=["meeting", "pt", "es", "en"], default="")
     ls.set_defaults(func=cmd_list)
 
     dv = sub.add_parser("devices", help="show detected audio devices")
