@@ -446,8 +446,43 @@ def describe_devices() -> list[str]:
     return _linux_describe()
 
 
-def _ffmpeg_track_cmd(source: str, output_path: str, input_format: str) -> list[str]:
-    """ffmpeg recording a single source to mono opus."""
+def _ffmpeg_track_cmd(
+    source: str, output_path: str, input_format: str, pad_seconds: float = 0.0
+) -> list[str]:
+    """ffmpeg recording a single source to mono opus.
+
+    When `pad_seconds` > 0 (a track turned on mid-recording, on a mode switch),
+    it prepends that much silence before the live audio, so the new track stays
+    aligned to t=0 of the others and diarization (which assumes all tracks start
+    together) stays correct. The finite silence (anullsrc with -t) is concatenated
+    with the live source (infinite until the stop signal).
+
+    `-flush_packets 1` forces the ogg muxer to write each packet to disk right
+    away, instead of buffering the whole recording in memory (the default, which
+    would leave the file at 0 bytes until a clean stop). This way, if the process
+    is killed (kill, hibernation, power loss) without the stop signal, the opus on
+    disk stays decodable and loses at most ~1s of audio, instead of everything.
+    """
+    if pad_seconds > 0:
+        return [
+            "ffmpeg",
+            "-y",
+            "-f", "lavfi",
+            "-t", f"{pad_seconds:.3f}",
+            "-i", "anullsrc=r=48000:cl=mono",
+            "-f", input_format,
+            "-i", source,
+            "-filter_complex",
+            "[0:a]aformat=sample_rates=48000:channel_layouts=mono[s];"
+            "[1:a]aformat=sample_rates=48000:channel_layouts=mono[m];"
+            "[s][m]concat=n=2:v=0:a=1[out]",
+            "-map", "[out]",
+            "-ac", "1",
+            "-c:a", "libopus",
+            "-b:a", "24k",
+            "-flush_packets", "1",
+            output_path,
+        ]
     return [
         "ffmpeg",
         "-y",
@@ -456,6 +491,7 @@ def _ffmpeg_track_cmd(source: str, output_path: str, input_format: str) -> list[
         "-ac", "1",
         "-c:a", "libopus",
         "-b:a", "24k",
+        "-flush_packets", "1",
         output_path,
     ]
 
@@ -502,50 +538,95 @@ def import_audio(src, dest) -> None:
         )
 
 
-def start_recording(meeting: Meeting, devices: Devices, mode: str) -> list[int]:
-    """Starts recording tracks in background. Returns ffmpeg PIDs.
+def start_recording(meeting: Meeting, devices: Devices, mode: str) -> dict[str, int]:
+    """Starts recording tracks in background.
 
-    One track per ffmpeg process: ensures separate tracks (basis for
-    level 1 diarization) and avoids premature mixing. Which tracks are recorded
-    depends on the sources resolved for the mode: in-person only has mic, listener
-    only has system, online has both.
-
-    Processes run detached from the terminal (POSIX: new session via
-    start_new_session; Windows: new process group) so that terminal Ctrl+C doesn't
-    reach them directly: shutdown is under exclusive control of stop_recording
-    (a single stop signal), ensuring ffmpeg finalizes the opus container correctly.
-    stderr goes to a log per track, useful for diagnostics.
+    Returns {'mic': pid, 'system': pid}, with 0 for a track not started. One
+    track per ffmpeg process: ensures separate tracks (basis for level 1
+    diarization) and avoids premature mixing. Which tracks are recorded depends
+    on the sources resolved for the mode: in-person only has mic, listener only
+    has system, online has both.
     """
-    pids: list[int] = []
     fmt = devices.input_format
-    popen_kwargs = _detached_popen_kwargs()
-
-    def _spawn(source: str, out_path, log_path) -> int:
-        log = open(log_path, "wb")
-        proc = subprocess.Popen(
-            _ffmpeg_track_cmd(source, str(out_path), fmt),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=log,
-            **popen_kwargs,
-        )
-        return proc.pid
+    pids: dict[str, int] = {"mic": 0, "system": 0}
 
     if devices.mic_source:
-        pids.append(
-            _spawn(devices.mic_source, meeting.audio_mic, meeting.ffmpeg_log_mic)
+        pids["mic"] = start_track(
+            devices.mic_source, meeting.audio_mic, meeting.ffmpeg_log_mic, fmt
         )
 
     if devices.monitor_source:
-        pids.append(
-            _spawn(
-                devices.monitor_source,
-                meeting.audio_system,
-                meeting.ffmpeg_log_system,
-            )
+        pids["system"] = start_track(
+            devices.monitor_source,
+            meeting.audio_system,
+            meeting.ffmpeg_log_system,
+            fmt,
         )
 
     return pids
+
+
+def start_track(
+    source: str,
+    out_path,
+    log_path,
+    input_format: str,
+    pad_seconds: float = 0.0,
+) -> int:
+    """Starts a single ffmpeg track in background and returns its PID.
+
+    Used both on the initial start and when turning a track on mid-recording (a
+    mode switch), in which case `pad_seconds` prepends silence to keep the track
+    time-aligned with the others.
+
+    The process runs detached from the terminal (POSIX: new session via
+    start_new_session; Windows: new process group) so terminal Ctrl+C doesn't
+    reach it directly: shutdown is under exclusive control of stop_recording/
+    stop_track (a single stop signal), ensuring ffmpeg finalizes the opus
+    container correctly. stderr goes to a log, useful for diagnostics.
+    """
+    log = open(log_path, "wb")
+    proc = subprocess.Popen(
+        _ffmpeg_track_cmd(source, str(out_path), input_format, pad_seconds),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=log,
+        **_detached_popen_kwargs(),
+    )
+    return proc.pid
+
+
+def stop_track(pid: int, timeout: float = 10.0) -> None:
+    """Stops a single ffmpeg track (same protocol as stop_recording)."""
+    if pid:
+        stop_recording([pid], timeout)
+
+
+def _proc_looks_like_ffmpeg(pid: int) -> bool:
+    """Best-effort: True if the PID is a live ffmpeg process.
+
+    Guards against stale/reused PIDs: after a crash + reboot, the PID stored in
+    meta may have been recycled by the OS for another process, and a blind signal
+    would kill the wrong one. On Linux it confirms via /proc/<pid>/cmdline; on
+    macOS/Windows (no /proc) it falls back to just 'is it alive?', so it doesn't
+    block a legitimate stop.
+    """
+    if not pid or not is_running(pid):
+        return False
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return b"ffmpeg" in fh.read().lower()
+    except OSError:
+        return True
+
+
+def any_recording_alive(pids: list[int]) -> bool:
+    """True if any of the PIDs is still a live recording ffmpeg.
+
+    Used to tell an in-progress recording apart from one interrupted by a crash
+    (meta status 'recording', but no ffmpeg alive).
+    """
+    return any(_proc_looks_like_ffmpeg(p) for p in pids)
 
 
 def stop_recording(pids: list[int], timeout: float = 10.0) -> None:
@@ -554,14 +635,20 @@ def stop_recording(pids: list[int], timeout: float = 10.0) -> None:
     The signal (POSIX: SIGINT; Windows: CTRL_BREAK_EVENT) makes ffmpeg write the
     opus container trailer and exit. We send only one signal per process and
     wait for it to finish, to avoid corrupting the output with a second signal.
+
+    Only signals PIDs that are still live ffmpeg processes: in a post-crash
+    recovery the PIDs in meta are already dead (and may have been reused), so a
+    blind signal would hit the wrong process. In that case there's nothing to
+    signal — the opus on disk is what's left (decodable thanks to -flush_packets).
     """
-    for pid in pids:
+    live = [p for p in pids if _proc_looks_like_ffmpeg(p)]
+    for pid in live:
         _send_stop_signal(pid)
 
     # Waits for each process to exit (until timeout), to ensure the opus
     # container was finalized before transcribing.
     deadline = time.time() + timeout
-    for pid in pids:
+    for pid in live:
         while is_running(pid) and time.time() < deadline:
             time.sleep(0.1)
 
@@ -606,9 +693,9 @@ _SIZE_UNIT = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 def read_progress(log_paths: list) -> tuple[int, float]:
     """Reads the size (bytes) and time (seconds) captured from ffmpeg logs.
 
-    The opus muxer only flushes data to the file when finalizing, so disk size
-    remains 0 during recording. The ffmpeg log, however, reports the current
-    'size=' and 'time=' — we use it as the live source of truth.
+    The ffmpeg log reports the current 'size=' and 'time=' continuously; we use
+    it as the live source of truth (the file on disk also grows live thanks to
+    -flush_packets, but the log gives elapsed time directly).
 
     Returns (total_bytes, max_time) by aggregating all tracks.
     """

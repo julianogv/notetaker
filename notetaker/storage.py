@@ -87,6 +87,8 @@ class Meta:
     stopped_at: str = ""
     duration_seconds: float = 0.0
     ffmpeg_pids: list[int] = field(default_factory=list)
+    mic_pid: int = 0                # ffmpeg PID of the mic track (0 = not active)
+    system_pid: int = 0            # ffmpeg PID of the system track (0 = not active)
     mic_source: str = ""
     monitor_source: str = ""
     detected_lang: str = ""        # language detected by Whisper (if auto)
